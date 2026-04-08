@@ -118,23 +118,36 @@ impl Coordinator {
 
         tracing::info!(models = ?installed, "Installed models detected");
 
-        // Check if recommended dev model is installed
+        // Check if recommended dev model is installed (exact match first, then base name)
         let dev = self.recommendation.dev_model;
-        let dev_installed = installed.iter()
-            .any(|m| m.starts_with(dev.split(':').next().unwrap_or(dev)));
+        let exact_match = installed.iter().any(|m| m == dev);
 
-        if !dev_installed {
-            // Find best fallback from catalog
-            for fallback in FALLBACK_MODELS {
-                let base = fallback.split(':').next().unwrap_or(fallback);
-                if installed.iter().any(|m| m.starts_with(base)) {
-                    self.force_model = Some(fallback.to_string());
-                    return onboard;
+        if exact_match {
+            // Perfect — recommended model exists as-is
+        } else {
+            // Try to find the best installed model by base name match
+            let dev_base = dev.split(':').next().unwrap_or(dev);
+
+            // First: check if a variant of the recommended model is installed
+            if let Some(actual) = installed.iter().find(|m| m.starts_with(dev_base)) {
+                self.force_model = Some(actual.clone());
+            } else {
+                // Fallback: try catalog models in priority order
+                let mut found = false;
+                for fallback in FALLBACK_MODELS {
+                    let base = fallback.split(':').next().unwrap_or(fallback);
+                    if let Some(actual) = installed.iter().find(|m| m.starts_with(base)) {
+                        self.force_model = Some(actual.clone());
+                        found = true;
+                        break;
+                    }
                 }
-            }
-            // Last resort: first installed model
-            if let Some(first) = installed.first() {
-                self.force_model = Some(first.clone());
+                // Last resort: first installed non-embedding model
+                if !found {
+                    if let Some(first) = installed.iter().find(|m| !m.contains("embed")) {
+                        self.force_model = Some(first.clone());
+                    }
+                }
             }
         }
 
