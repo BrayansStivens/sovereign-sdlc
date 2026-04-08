@@ -1,4 +1,6 @@
 //! Splash Screen + Sentinel Bot Animation
+//!
+//! Houston-style expressive bot with the name Sentinel.
 
 /// Block-letter startup banner
 pub const SPLASH: &[&str] = &[
@@ -14,54 +16,52 @@ pub const SPLASH: &[&str] = &[
 ];
 
 // ────────────────────────────────────────────────────────
-// Sentinel — The watching eye of Sovereign
+// Sentinel — Houston-style expressive bot
 // ────────────────────────────────────────────────────────
 
-/// Sentinel expression: face + message
 pub struct SentinelFrame {
     pub face: &'static str,
     pub message: &'static str,
 }
 
 const SENTINEL_IDLE: &[SentinelFrame] = &[
-    SentinelFrame { face: "  ( o.o )  ", message: "Ready" },
-    SentinelFrame { face: "  ( -.- )  ", message: "..." },
-    SentinelFrame { face: "  ( o.o )  ", message: "Listening" },
+    SentinelFrame { face: " ● ◡ ● ", message: "Ready" },
+    SentinelFrame { face: " - ᴥ - ", message: "..." },
+    SentinelFrame { face: " ● ◡ ● ", message: "Listening" },
 ];
 
 const SENTINEL_ROUTING: SentinelFrame = SentinelFrame {
-    face: "  ( o.o )> ", message: "Routing...",
+    face: " ● ◡ ● ", message: "Routing...",
 };
 
 const SENTINEL_THINKING: &[SentinelFrame] = &[
-    SentinelFrame { face: "  ( >.< )  ", message: "Thinking..." },
-    SentinelFrame { face: "  ( *_* )  ", message: "Processing..." },
-    SentinelFrame { face: "  ( -.- )  ", message: "Analyzing..." },
-    SentinelFrame { face: "  ( o.o )  ", message: "Reasoning..." },
+    SentinelFrame { face: " ◠ ◡ ◠ ", message: "Thinking..." },
+    SentinelFrame { face: " ✦ ◡ ✦ ", message: "Processing..." },
+    SentinelFrame { face: " - ᴥ - ", message: "Analyzing..." },
+    SentinelFrame { face: " ◠ ◡ ◠ ", message: "Reasoning..." },
 ];
 
 const SENTINEL_GENERATING: &[SentinelFrame] = &[
-    SentinelFrame { face: "  ( ^.^ )  ", message: "Writing..." },
-    SentinelFrame { face: "  ( *_* )  ", message: "Crafting..." },
-    SentinelFrame { face: "  ( o.o )> ", message: "Flowing..." },
-    SentinelFrame { face: "  ( ^.^ )  ", message: "Almost..." },
-    SentinelFrame { face: "  ( >.> )  ", message: "Checking..." },
-    SentinelFrame { face: "  ( ^_^ )  ", message: "Polishing..." },
+    SentinelFrame { face: " ● ◡ ● ", message: "Writing..." },
+    SentinelFrame { face: " ✦ ◡ ✦ ", message: "Crafting..." },
+    SentinelFrame { face: " ◠ ◡ ◠ ", message: "Almost there..." },
+    SentinelFrame { face: " ^ ᴥ ^ ", message: "Coming along!" },
+    SentinelFrame { face: " ● ◡ ● ", message: "Keep going..." },
+    SentinelFrame { face: " ✦ ◡ ✦ ", message: "Polishing..." },
 ];
 
 const SENTINEL_ERROR: SentinelFrame = SentinelFrame {
-    face: "  ( ;_; )  ", message: "Error...",
+    face: " ; ᴥ ; ", message: "Ups, an error...",
 };
 
 const SENTINEL_DONE: SentinelFrame = SentinelFrame {
-    face: "  ( ^_^ )  ", message: "Done!",
+    face: " ^ ᴥ ^ ", message: "Done!",
 };
 
 const SENTINEL_INDEXING: SentinelFrame = SentinelFrame {
-    face: "  ( *_* )  ", message: "Indexing...",
+    face: " ✦ ◡ ✦ ", message: "Indexing project...",
 };
 
-/// Sentinel display state
 pub enum SentinelMood {
     Idle,
     Routing,
@@ -72,7 +72,6 @@ pub enum SentinelMood {
     Indexing,
 }
 
-/// Get the Sentinel face and message for current mood/tick
 pub fn sentinel_frame(mood: &SentinelMood, tick: u64) -> (&'static str, &'static str) {
     match mood {
         SentinelMood::Idle => {
@@ -94,11 +93,12 @@ pub fn sentinel_frame(mood: &SentinelMood, tick: u64) -> (&'static str, &'static
     }
 }
 
-/// Render Sentinel as 2 lines: face and message
-pub fn sentinel_lines(mood: &SentinelMood, tick: u64) -> [String; 2] {
+/// Render Sentinel as 3 lines: boxed face with message (Houston style)
+pub fn sentinel_lines(mood: &SentinelMood, tick: u64) -> [String; 3] {
     let (face, message) = sentinel_frame(mood, tick);
     [
-        face.to_string(),
-        format!("    {message}"),
+        "   ╭─────╮".to_string(),
+        format!("   │{}│  {}", face, message),
+        "   ╰─────╯".to_string(),
     ]
 }

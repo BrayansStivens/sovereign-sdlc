@@ -439,14 +439,13 @@ fn render_activity(frame: &mut Frame, loading: &LoadingAnimation, coord: &Coordi
         SentinelMood::Indexing => YELLOW_WARN,
     };
 
-    // Sentinel face + message (2 lines, no box)
+    // Sentinel face in box (Houston style, 3 lines)
     let sentinel = splash::sentinel_lines(&mood, loading.tick);
-    lines.push(Line::from(Span::styled(
-        sentinel[0].clone(), Style::default().fg(face_color).bold(),
-    )));
-    lines.push(Line::from(Span::styled(
-        sentinel[1].clone(), Style::default().fg(face_color),
-    )));
+    for sl in &sentinel {
+        lines.push(Line::from(Span::styled(
+            sl.clone(), Style::default().fg(face_color),
+        )));
+    }
     lines.push(Line::from(""));
 
     // Project stats
