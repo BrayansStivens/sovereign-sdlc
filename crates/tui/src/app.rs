@@ -768,16 +768,25 @@ async fn run_agent_loop(
     system_context: String,
 ) {
     let client = sovereign_api::OllamaClient::new();
+
+    // Simple, explicit prompt that even 7B models follow
     let react_prompt = format!(
         "{system_context}\n\
-         You are a ReAct agent. For the user's request, follow this loop:\n\
-         1. Thought: Reason about what you need to do.\n\
-         2. Action: Choose ONE action:\n\
-            - READ_FILE <path> — read a file\n\
-            - EXECUTE <command> — run a shell command\n\
-            - ANSWER <response> — give your final answer\n\
-         3. You'll receive the result, then continue.\n\
-         Output ONE Thought and ONE Action per turn.\n\n\
+         You are an AI assistant with access to the user's computer.\n\
+         To answer the user's question, you may need to run commands.\n\n\
+         IMPORTANT: When you need to run a command, output EXACTLY this format on its own line:\n\
+         EXECUTE: <command>\n\n\
+         When you need to read a file:\n\
+         READ: <filepath>\n\n\
+         When you have the final answer:\n\
+         ANSWER: <your response>\n\n\
+         Example:\n\
+         User: what directory are we in?\n\
+         EXECUTE: pwd\n\n\
+         Example:\n\
+         User: what's in main.rs?\n\
+         READ: src/main.rs\n\n\
+         Now answer this:\n\
          User: {prompt}"
     );
 
@@ -785,103 +794,154 @@ async fn run_agent_loop(
     let max_iterations = 6;
 
     for i in 0..max_iterations {
-        let _ = tx.send(GenResult::AgentThink(format!("Step {}/{max_iterations}...", i + 1))).await;
+        let _ = tx.send(GenResult::AgentThink(format!("Step {}/{max_iterations}", i + 1))).await;
 
-        // Ask LLM for next thought + action
         let response = match client.generate(&model, &context).await {
             Ok(r) => r,
             Err(e) => {
-                let _ = tx.send(GenResult::Error(format!("Agent error: {e}"))).await;
+                let _ = tx.send(GenResult::Error(format!("Agent: {e}"))).await;
                 return;
             }
         };
 
-        // Parse thought
-        let thought = response.lines()
-            .take_while(|l| {
-                let t = l.trim();
-                !t.starts_with("Action:") && !t.starts_with("READ_FILE")
-                    && !t.starts_with("EXECUTE") && !t.starts_with("ANSWER")
-            })
-            .collect::<Vec<_>>().join(" ");
+        // Try to find an action in the response (flexible parsing)
+        let action = parse_agent_action(&response);
 
-        if !thought.trim().is_empty() {
-            let short = if thought.len() > 120 { format!("{}...", &thought[..120]) } else { thought.clone() };
-            let _ = tx.send(GenResult::AgentThink(short)).await;
-        }
+        match action {
+            AgentAction::Execute(cmd) => {
+                let short_thought = extract_thought(&response);
+                if !short_thought.is_empty() {
+                    let _ = tx.send(GenResult::AgentThink(short_thought)).await;
+                }
 
-        // Parse action
-        let action_line = response.lines().find(|l| {
-            let t = l.trim();
-            t.starts_with("Action:") || t.starts_with("READ_FILE")
-                || t.starts_with("EXECUTE") || t.starts_with("ANSWER")
-        });
+                let _ = tx.send(GenResult::AgentNeedApproval {
+                    command: cmd.clone(),
+                    reason: "Agent wants to run this command".into(),
+                }).await;
 
-        let action_text = action_line.unwrap_or("ANSWER I couldn't determine what to do.");
-        let action_trimmed = action_text.trim()
-            .strip_prefix("Action: ").unwrap_or(action_text.trim());
-
-        if let Some(path) = action_trimmed.strip_prefix("READ_FILE ") {
-            let path = path.trim();
-            let _ = tx.send(GenResult::AgentReadFile(path.to_string())).await;
-
-            let observation = match std::fs::read_to_string(path) {
-                Ok(content) => {
-                    if content.len() > 3000 {
-                        format!("{}\n... [truncated, {} bytes total]", &content[..3000], content.len())
-                    } else {
-                        content
+                match approval_rx.recv().await {
+                    Some(ApprovalResponse::Approved) => {
+                        let cwd = std::env::current_dir()
+                            .unwrap_or_else(|_| PathBuf::from("."))
+                            .to_string_lossy().to_string();
+                        let obs = match diff::execute_command(&cmd, &cwd) {
+                            Ok(r) => if r.success { r.stdout } else { format!("Error: {}", r.stderr) },
+                            Err(e) => format!("Failed: {e}"),
+                        };
+                        context.push_str(&format!("\nResult of `{cmd}`:\n{obs}\n\nNow give the final ANSWER:"));
+                    }
+                    _ => {
+                        context.push_str("\nThe user denied that command. Give an ANSWER: with what you know.");
                     }
                 }
-                Err(e) => format!("Error reading {path}: {e}"),
-            };
-            context.push_str(&format!("\n{response}\nObservation: {observation}"));
-
-        } else if let Some(cmd) = action_trimmed.strip_prefix("EXECUTE ") {
-            let cmd = cmd.trim().to_string();
-
-            // Ask user for approval
-            let _ = tx.send(GenResult::AgentNeedApproval {
-                command: cmd.clone(),
-                reason: thought.chars().take(100).collect(),
-            }).await;
-
-            // Wait for approval
-            match approval_rx.recv().await {
-                Some(ApprovalResponse::Approved) => {
-                    let cwd = std::env::current_dir()
-                        .unwrap_or_else(|_| PathBuf::from("."))
-                        .to_string_lossy().to_string();
-                    let observation = match diff::execute_command(&cmd, &cwd) {
-                        Ok(result) => {
-                            if result.success {
-                                result.stdout
-                            } else {
-                                format!("Exit {}: {}", result.exit_code, result.stderr)
-                            }
-                        }
-                        Err(e) => format!("Failed: {e}"),
-                    };
-                    context.push_str(&format!("\n{response}\nObservation: {observation}"));
-                }
-                Some(ApprovalResponse::Denied) | None => {
-                    context.push_str(&format!("\n{response}\nObservation: Command denied by user."));
-                }
             }
-
-        } else if let Some(answer) = action_trimmed.strip_prefix("ANSWER ") {
-            let _ = tx.send(GenResult::AgentDone(answer.to_string())).await;
-            return;
-        } else {
-            // No recognizable action — treat entire response as answer
-            let _ = tx.send(GenResult::AgentDone(response)).await;
-            return;
+            AgentAction::Read(path) => {
+                let _ = tx.send(GenResult::AgentReadFile(path.clone())).await;
+                let obs = match std::fs::read_to_string(&path) {
+                    Ok(c) => if c.len() > 3000 {
+                        let end = (0..=3000).rev().find(|&i| c.is_char_boundary(i)).unwrap_or(0);
+                        format!("{}...\n[truncated]", &c[..end])
+                    } else { c },
+                    Err(e) => format!("Error: {e}"),
+                };
+                context.push_str(&format!("\nContents of {path}:\n{obs}\n\nNow give the final ANSWER:"));
+            }
+            AgentAction::Answer(answer) => {
+                let _ = tx.send(GenResult::AgentDone(answer)).await;
+                return;
+            }
+            AgentAction::None => {
+                // LLM didn't follow format — treat entire response as answer
+                let _ = tx.send(GenResult::AgentDone(response)).await;
+                return;
+            }
         }
     }
 
-    let _ = tx.send(GenResult::AgentDone(
-        "Reached maximum steps. Here's what I found based on my analysis.".into()
-    )).await;
+    let _ = tx.send(GenResult::AgentDone("Max steps reached.".into())).await;
+}
+
+/// Possible agent actions parsed from LLM response
+enum AgentAction {
+    Execute(String),
+    Read(String),
+    Answer(String),
+    None,
+}
+
+/// Flexibly parse an action from LLM response (handles many formats)
+fn parse_agent_action(response: &str) -> AgentAction {
+    for line in response.lines() {
+        let t = line.trim();
+
+        // EXECUTE: pwd  or  Action: EXECUTE pwd  or  ```bash\npwd\n```
+        if let Some(cmd) = t.strip_prefix("EXECUTE:")
+            .or_else(|| t.strip_prefix("EXECUTE "))
+            .or_else(|| t.strip_prefix("Action: EXECUTE "))
+            .or_else(|| t.strip_prefix("Action: EXECUTE:"))
+        {
+            let cmd = cmd.trim();
+            if !cmd.is_empty() {
+                return AgentAction::Execute(cmd.to_string());
+            }
+        }
+
+        // READ: path  or  READ_FILE path
+        if let Some(path) = t.strip_prefix("READ:")
+            .or_else(|| t.strip_prefix("READ "))
+            .or_else(|| t.strip_prefix("READ_FILE "))
+            .or_else(|| t.strip_prefix("Action: READ_FILE "))
+            .or_else(|| t.strip_prefix("Action: READ "))
+        {
+            let path = path.trim();
+            if !path.is_empty() {
+                return AgentAction::Read(path.to_string());
+            }
+        }
+
+        // ANSWER: text
+        if let Some(answer) = t.strip_prefix("ANSWER:")
+            .or_else(|| t.strip_prefix("ANSWER "))
+            .or_else(|| t.strip_prefix("Action: ANSWER "))
+        {
+            let answer = answer.trim();
+            if !answer.is_empty() {
+                return AgentAction::Answer(answer.to_string());
+            }
+        }
+    }
+
+    // Check for ```bash blocks as implicit EXECUTE
+    if let Some(start) = response.find("```bash") {
+        let content_start = start + 7;
+        if let Some(end) = response[content_start..].find("```") {
+            let cmd = response[content_start..content_start + end].trim();
+            if !cmd.is_empty() && cmd.lines().count() <= 2 {
+                return AgentAction::Execute(cmd.to_string());
+            }
+        }
+    }
+
+    AgentAction::None
+}
+
+/// Extract the "thinking" part of a response (before any action keyword)
+fn extract_thought(response: &str) -> String {
+    let thought: String = response.lines()
+        .take_while(|l| {
+            let t = l.trim().to_uppercase();
+            !t.starts_with("EXECUTE") && !t.starts_with("READ")
+                && !t.starts_with("ANSWER") && !t.starts_with("ACTION")
+                && !t.starts_with("```")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trimmed = thought.trim();
+    if trimmed.len() > 150 {
+        format!("{}...", &trimmed[..150])
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Detect if LLM response contains a proposed action (edit or command)
