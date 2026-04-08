@@ -754,7 +754,6 @@ fn strip_tool_block(text: &str) -> String {
         while let Some(start) = result.find(marker) {
             let after = start + marker.len();
             if let Some(end) = result[after..].find("```") {
-                // Remove from marker start to closing ```
                 result.replace_range(start..after + end + 3, "");
             } else {
                 // No closing ``` — remove from marker to end
@@ -763,5 +762,7 @@ fn strip_tool_block(text: &str) -> String {
             }
         }
     }
-    result
+    // Clean up leftover backticks and whitespace from partial fences
+    let result = result.trim().trim_matches('`').trim();
+    result.to_string()
 }

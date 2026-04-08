@@ -178,10 +178,11 @@ pub async fn run_agent_loop(
                     duration_ms,
                 });
 
-                // Feed result back to conversation
-                // Use User role with prefix as fallback (some models don't understand Tool role)
+                // Feed result back and prompt model to respond
                 conversation.push(ConversationMessage::user(format!(
-                    "[Tool Result for {}]:\n{}",
+                    "[Tool Result for {}]:\n{}\n\nUse this result to answer the user. \
+                     If you need more information, call another tool. \
+                     Otherwise, give your answer now.",
                     tool_call.name, result.output
                 )));
 
