@@ -809,7 +809,47 @@ fn needs_agent(prompt: &str) -> bool {
     signals.iter().any(|s| lower.contains(s))
 }
 
-/// Run the ReAct agent loop in a background task
+/// Map common user intents to automatic tool calls.
+/// Returns (command_to_run, description) if we can help automatically.
+fn intent_to_command(prompt: &str) -> Option<(&'static str, &'static str)> {
+    let lower = prompt.to_lowercase();
+
+    // Directory questions → pwd
+    if lower.contains("carpeta") || lower.contains("directorio") || lower.contains("folder")
+        || lower.contains("directory") || lower.contains("pwd") || lower.contains("where am i")
+        || lower.contains("donde estamos") || lower.contains("que carpeta")
+    {
+        return Some(("pwd", "Current directory"));
+    }
+
+    // List files → ls
+    if lower.contains("que archivos") || lower.contains("what files") || lower.contains("list files")
+        || lower.contains("show files") || lower.contains("muestra archivos")
+        || (lower.contains("ls") && lower.len() < 20)
+    {
+        return Some(("ls -la", "List files"));
+    }
+
+    // Git status
+    if lower.contains("git status") || lower.contains("estado del repo")
+        || lower.contains("cambios sin commit") || lower.contains("uncommitted")
+    {
+        return Some(("git status", "Git status"));
+    }
+
+    // Git log
+    if lower.contains("git log") || lower.contains("ultimos commits") || lower.contains("recent commits") {
+        return Some(("git log --oneline -10", "Recent commits"));
+    }
+
+    // Disk space
+    if lower.contains("espacio") || lower.contains("disk space") || lower.contains("storage") {
+        return Some(("df -h .", "Disk space"));
+    }
+
+    None
+}
+
 /// Run the tool-aware agent loop (claurst-style)
 async fn run_agent_loop(
     tx: mpsc::Sender<GenResult>,
@@ -824,10 +864,43 @@ async fn run_agent_loop(
     let registry = default_registry();
     let ctx = ToolContext::new();
 
-    // Build system prompt with tool descriptions
+    // ── Smart pre-executor: detect common intents and run commands first ──
+    // This avoids depending on the LLM to emit tool calls (which 7B models often fail at)
+    let pre_context = if let Some((cmd, desc)) = intent_to_command(&prompt) {
+        let _ = tx.send(GenResult::AgentNeedApproval {
+            command: cmd.to_string(),
+            reason: desc.to_string(),
+        }).await;
+
+        match approval_rx.recv().await {
+            Some(ApprovalResponse::Approved) => {
+                let result = sovereign_core::diff::execute_command(cmd,
+                    &ctx.working_dir.to_string_lossy());
+                match result {
+                    Ok(r) => {
+                        let _ = tx.send(GenResult::AgentThink(
+                            format!("[+] {desc}: {} bytes", r.stdout.len())
+                        )).await;
+                        format!("\n\n[System executed `{cmd}` for you. Result:]\n{}\n\n\
+                                 Use this result to answer the user's question naturally.",
+                                r.stdout)
+                    }
+                    Err(e) => format!("\n\n[Command `{cmd}` failed: {e}]\n")
+                }
+            }
+            _ => {
+                let _ = tx.send(GenResult::AgentThink("[denied]".into())).await;
+                "\n\n[The user denied the command. Answer based on what you know.]\n".into()
+            }
+        }
+    } else {
+        String::new()
+    };
+
+    // Build system prompt with tool descriptions + pre-context
     let tools_prompt = registry.system_prompt();
     let full_system = format!(
-        "{system_context}\n{tools_prompt}\n\
+        "{system_context}\n{tools_prompt}{pre_context}\n\
          User: {prompt}"
     );
 
