@@ -447,7 +447,8 @@ pub async fn run_tui() -> Result<()> {
 
 // ── Render helpers ──
 
-fn render_chat(frame: &mut Frame, messages: &[ChatMsg], scroll: u16, area: Rect) {
+/// scroll_back = 0 means auto-scroll to bottom. >0 means user scrolled up N lines.
+fn render_chat(frame: &mut Frame, messages: &[ChatMsg], scroll_back: u16, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     for msg in messages {
         let (icon, color) = match msg.role {
@@ -467,12 +468,23 @@ fn render_chat(frame: &mut Frame, messages: &[ChatMsg], scroll: u16, area: Rect)
         }
         lines.push(Line::from(""));
     }
+
+    // Auto-scroll: calculate scroll position from bottom
+    let visible_height = area.height.saturating_sub(2) as usize; // minus borders
+    let total_lines = lines.len();
+    let max_scroll = total_lines.saturating_sub(visible_height) as u16;
+    let scroll_pos = if scroll_back == 0 {
+        max_scroll // auto-scroll to bottom
+    } else {
+        max_scroll.saturating_sub(scroll_back) // user scrolled back
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(SURFACE_LIGHT))
         .title(Span::styled(" Sovereign SDLC ", Style::default().fg(INDIGO).bold()));
-    frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }).scroll((scroll, 0)), area);
+    frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }).scroll((scroll_pos, 0)), area);
 }
 
 fn render_input(frame: &mut Frame, input: &str, cursor: usize, busy: bool, paste: Option<(usize, usize)>, area: Rect) {
