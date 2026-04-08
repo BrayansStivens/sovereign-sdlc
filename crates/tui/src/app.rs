@@ -72,6 +72,8 @@ pub async fn run_tui() -> Result<()> {
     let mut cursor_pos: usize = 0;
     let mut scroll: u16 = 0;
     let mut running = true;
+    let mut paste_range: Option<(usize, usize)> = None; // (start, end) of last pasted block
+    let mut last_key_time = Instant::now();
     let mut last_hw = Instant::now();
     let mut loading = LoadingAnimation::new();
     let mut gen_start: Option<Instant> = None;
@@ -185,7 +187,7 @@ pub async fn run_tui() -> Result<()> {
             }
 
             // ── Input ──
-            render_input(frame, &input, cursor_pos, loading.is_active(), main_v[2]);
+            render_input(frame, &input, cursor_pos, loading.is_active(), paste_range, main_v[2]);
         })?;
 
         // Events
@@ -293,11 +295,56 @@ pub async fn run_tui() -> Result<()> {
                     KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'c' => {
                         buddy.save(); running = false;
                     }
+                    KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'z' => {
+                        // Suspend to background (like Claude Code)
+                        buddy.save();
+                        disable_raw_mode()?;
+                        stdout().execute(LeaveAlternateScreen)?;
+                        #[cfg(unix)]
+                        {
+                            // Send SIGTSTP to self
+                            unsafe { libc::raise(libc::SIGTSTP); }
+                        }
+                        // When fg resumes, restore terminal
+                        enable_raw_mode()?;
+                        stdout().execute(EnterAlternateScreen)?;
+                        terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+                    }
                     KeyCode::Char(c) if !loading.is_active() => {
-                        input.insert(cursor_pos, c);
-                        cursor_pos += 1;
+                        // Paste detection: if chars arrive < 5ms apart, it's a paste
+                        let now = Instant::now();
+                        let is_paste = now.duration_since(last_key_time) < Duration::from_millis(5);
+                        last_key_time = now;
+
+                        if is_paste {
+                            // Extend paste range
+                            if let Some((start, _)) = paste_range {
+                                input.insert(cursor_pos, c);
+                                cursor_pos += 1;
+                                paste_range = Some((start, cursor_pos));
+                            } else {
+                                let start = cursor_pos.saturating_sub(1);
+                                input.insert(cursor_pos, c);
+                                cursor_pos += 1;
+                                paste_range = Some((start, cursor_pos));
+                            }
+                        } else {
+                            paste_range = None;
+                            input.insert(cursor_pos, c);
+                            cursor_pos += 1;
+                        }
                     }
                     KeyCode::Backspace if cursor_pos > 0 && !loading.is_active() => {
+                        // If we have a paste range and cursor is at end, delete entire paste
+                        if let Some((start, end)) = paste_range {
+                            if cursor_pos == end && start < end {
+                                input.drain(start..end);
+                                cursor_pos = start;
+                                paste_range = None;
+                                continue;
+                            }
+                        }
+                        paste_range = None;
                         cursor_pos -= 1;
                         input.remove(cursor_pos);
                     }
@@ -359,15 +406,32 @@ fn render_chat(frame: &mut Frame, messages: &[ChatMsg], scroll: u16, area: Rect)
     frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }).scroll((scroll, 0)), area);
 }
 
-fn render_input(frame: &mut Frame, input: &str, cursor: usize, busy: bool, area: Rect) {
+fn render_input(frame: &mut Frame, input: &str, cursor: usize, busy: bool, paste: Option<(usize, usize)>, area: Rect) {
     let sym = if busy { "  \u{2026} " } else { "  \u{03bb} " };
     let color = if busy { TEXT_DIM } else { INDIGO };
+
+    // If paste is active, show summary instead of raw text
+    let display = if let Some((start, end)) = paste {
+        let pasted_len = end - start;
+        let pasted_text = &input[start..end.min(input.len())];
+        let line_count = pasted_text.chars().filter(|&c| c == '\n').count() + 1;
+        if line_count > 1 || pasted_len > 60 {
+            let prefix = &input[..start];
+            let suffix = if end < input.len() { &input[end..] } else { "" };
+            format!("{sym}{prefix}[Pasted +{line_count} lines]{suffix}")
+        } else {
+            format!("{sym}{input}")
+        }
+    } else {
+        format!("{sym}{input}")
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(color));
     frame.render_widget(
-        Paragraph::new(Span::styled(format!("{sym}{input}"), Style::default().fg(if busy { TEXT_DIM } else { TEXT })))
+        Paragraph::new(Span::styled(&display, Style::default().fg(if busy { TEXT_DIM } else { TEXT })))
             .block(block),
         area,
     );

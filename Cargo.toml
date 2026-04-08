@@ -63,6 +63,9 @@ hex = "0.4"
 # Diff engine
 similar = "2"
 
+# Unix signals (for Ctrl+Z suspend)
+libc = "0.2"
+
 # Internal crates
 sovereign-core = { path = "crates/core" }
 sovereign-tools = { path = "crates/tools" }
