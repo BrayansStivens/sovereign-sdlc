@@ -1,0 +1,23 @@
+# Build
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Sovereign project data (per-project, not repo-level)
+.sovereign/
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+*.p12

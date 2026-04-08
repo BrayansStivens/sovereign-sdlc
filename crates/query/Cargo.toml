@@ -1,0 +1,18 @@
+[package]
+name = "sovereign-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent orchestrator — ReAct loop, smart routing, model hopping"
+
+[dependencies]
+sovereign-core = { workspace = true }
+sovereign-api = { workspace = true }
+sovereign-tools = { workspace = true }
+ollama-rs = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }

@@ -1,0 +1,20 @@
+[package]
+name = "sovereign-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Terminal UI — 3-panel ratatui interface"
+
+[dependencies]
+sovereign-core = { workspace = true }
+sovereign-query = { workspace = true }
+sovereign-tools = { workspace = true }
+sovereign-api = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }

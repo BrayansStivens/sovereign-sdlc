@@ -1,0 +1,17 @@
+[package]
+name = "sovereign-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Security pipeline — SAST, SCA, and code analysis tools"
+
+[dependencies]
+sovereign-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

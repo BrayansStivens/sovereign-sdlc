@@ -1,0 +1,16 @@
+[package]
+name = "sovereign-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ollama API client wrapper and model management"
+
+[dependencies]
+sovereign-core = { workspace = true }
+ollama-rs = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

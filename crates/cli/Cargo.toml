@@ -1,0 +1,21 @@
+[package]
+name = "sovereign-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sovereign SDLC — CLI entry point"
+
+[[bin]]
+name = "sovereign"
+path = "src/main.rs"
+
+[dependencies]
+sovereign-core = { workspace = true }
+sovereign-api = { workspace = true }
+sovereign-tools = { workspace = true }
+sovereign-query = { workspace = true }
+sovereign-tui = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

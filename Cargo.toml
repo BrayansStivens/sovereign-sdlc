@@ -1,0 +1,74 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/tools",
+    "crates/query",
+    "crates/tui",
+    "crates/cli",
+    "crates/api",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.4.0"
+edition = "2024"
+license = "MIT"
+description = "Sovereign SDLC — Local AI agent for secure software development"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+async-trait = "0.1"
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Ollama
+ollama-rs = { version = "0.2", features = ["stream"] }
+
+# Hardware & System
+sysinfo = "0.33"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Time
+chrono = "0.4"
+
+# Filesystem
+walkdir = "2"
+
+# Binary serialization (for vector index persistence)
+bincode = "1"
+
+# SQLite (session history, grimoire)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Crypto (report integrity, secret hashing)
+sha2 = "0.10"
+hex = "0.4"
+
+# Internal crates
+sovereign-core = { path = "crates/core" }
+sovereign-tools = { path = "crates/tools" }
+sovereign-query = { path = "crates/query" }
+sovereign-tui = { path = "crates/tui" }
+sovereign-api = { path = "crates/api" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
