@@ -50,7 +50,7 @@ pub enum LoadingState {
 /// Manages loading animation state
 pub struct LoadingAnimation {
     pub state: LoadingState,
-    tick: u64,
+    pub tick: u64,
     /// Latest telemetry from generation
     pub telemetry: Option<GenTelemetry>,
 }

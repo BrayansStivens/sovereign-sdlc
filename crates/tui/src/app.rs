@@ -32,7 +32,7 @@ const MAUVE: Color = Color::Rgb(203, 166, 247);
 /// Async generation results
 enum GenResult {
     RouteInfo(String),
-    Response(String),
+    Response { text: String, summary: String },
     Error(String),
 }
 
@@ -48,11 +48,13 @@ pub async fn run_tui() -> Result<()> {
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut buddy = Buddy::load_or_create(&project_root);
 
+    // Splash
+    let splash_art = crate::splash::SPLASH.join("\n");
     let mut messages: Vec<ChatMsg> = vec![
+        ChatMsg::route(splash_art),
         ChatMsg::system(format!(
-            "Sovereign SDLC v{} | {} | {} | Model: {}",
-            env!("CARGO_PKG_VERSION"), coordinator.hw.platform,
-            coordinator.hw.tier, coordinator.active_model(),
+            "{} | {} | Model: {}",
+            coordinator.hw.platform, coordinator.hw.tier, coordinator.active_model(),
         )),
     ];
 
@@ -108,15 +110,10 @@ pub async fn run_tui() -> Result<()> {
                     messages.push(ChatMsg::route(info));
                     loading.set(LoadingState::Thinking);
                 }
-                GenResult::Response(resp) => {
-                    buddy.on_code_audited(resp.lines().count() as u64);
-                    // Telemetry summary
-                    let elapsed = gen_start.map(|s| s.elapsed().as_millis() as u64).unwrap_or(0);
-                    loading.finish_generation(elapsed, resp.len());
-                    if let Some(summary) = loading.last_summary() {
-                        messages.push(ChatMsg::route(summary));
-                    }
-                    messages.push(ChatMsg::assistant(resp));
+                GenResult::Response { text, summary } => {
+                    buddy.on_code_audited(text.lines().count() as u64);
+                    messages.push(ChatMsg::route(summary));
+                    messages.push(ChatMsg::assistant(text));
                     loading.set(LoadingState::Idle);
                     gen_start = None;
                     scroll = 0;
@@ -160,10 +157,14 @@ pub async fn run_tui() -> Result<()> {
                 .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
                 .split(main_v[0]);
 
-            // Sidebar: [Hardware 7] [Buddy rest]
+            // Sidebar: [Hardware 6] [Buddy 12] [Activity rest]
             let sidebar = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(7), Constraint::Min(8)])
+                .constraints([
+                    Constraint::Length(6),
+                    Constraint::Length(12),
+                    Constraint::Min(4),
+                ])
                 .split(h_split[1]);
 
             // ── Chat ──
@@ -174,6 +175,9 @@ pub async fn run_tui() -> Result<()> {
 
             // ── Buddy ──
             buddy.render(frame, sidebar[1], ram_free);
+
+            // ── Activity panel (robot animation or project stats) ──
+            render_activity(frame, &loading, &coordinator, sidebar[2]);
 
             // ── Status bar ──
             if loading.is_active() {
@@ -272,8 +276,14 @@ pub async fn run_tui() -> Result<()> {
                                 let m = model.clone();
                                 let client = sovereign_api::OllamaClient::new();
                                 tokio::spawn(async move {
-                                    match client.generate(&m, &full).await {
-                                        Ok(r) => { let _ = tx.send(GenResult::Response(r)).await; }
+                                    match client.generate_with_metrics(&m, &full).await {
+                                        Ok(metrics) => {
+                                            let summary = metrics.summary();
+                                            let _ = tx.send(GenResult::Response {
+                                                text: metrics.response,
+                                                summary,
+                                            }).await;
+                                        }
                                         Err(e) => { let _ = tx.send(GenResult::Error(format!("{e}"))).await; }
                                     }
                                 });
@@ -402,6 +412,54 @@ fn render_hw(frame: &mut Frame, cpu: u16, ram: u16, tier: &PerformanceTier, mode
         .borders(Borders::ALL).border_type(BorderType::Rounded)
         .border_style(Style::default().fg(SURFACE_LIGHT))
         .title(Span::styled(" HW ", Style::default().fg(CYAN_ACCENT)));
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn render_activity(frame: &mut Frame, loading: &LoadingAnimation, coord: &Coordinator, area: Rect) {
+    use crate::splash;
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    if loading.is_active() {
+        // Show animated robot during generation
+        let robot = splash::robot_frame(loading.tick);
+        for rl in robot {
+            lines.push(Line::from(Span::styled(
+                format!("    {rl}"),
+                Style::default().fg(CYAN_ACCENT).bold(),
+            )));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("    {}", splash::progress_dots(loading.tick)),
+            Style::default().fg(INDIGO),
+        )));
+    } else {
+        // Show project stats when idle
+        let rag_status = if coord.rag_enabled {
+            format!("{} chunks", coord.memory.chunk_count())
+        } else {
+            "not indexed".into()
+        };
+        let grimoire_n = coord.grimoire.as_ref()
+            .and_then(|g| g.count().ok()).unwrap_or(0);
+
+        lines.push(Line::from(Span::styled(" Project", Style::default().fg(INDIGO).bold())));
+        lines.push(Line::from(Span::styled(
+            format!(" RAG  {rag_status}"), Style::default().fg(TEXT_DIM),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(" Fixes  {grimoire_n} patterns"), Style::default().fg(TEXT_DIM),
+        )));
+    }
+
+    let title = if loading.is_active() { " Working " } else { " Status " };
+    let color = if loading.is_active() { CYAN_ACCENT } else { SURFACE_LIGHT };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color))
+        .title(Span::styled(title, Style::default().fg(color)));
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
