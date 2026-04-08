@@ -398,6 +398,64 @@ impl Coordinator {
         self.hw.tier
     }
 
+    // ── Agent Session ──
+
+    /// Start an agent session: spawns the agent loop and returns channels.
+    /// The TUI receives AgentEvents and sends AgentCommands.
+    pub fn start_agent_session(
+        &self,
+        prompt: &str,
+    ) -> (
+        tokio::sync::mpsc::UnboundedReceiver<crate::agent_loop::AgentEvent>,
+        tokio::sync::mpsc::UnboundedSender<crate::agent_loop::AgentCommand>,
+    ) {
+        use crate::agent_loop::{AgentCommand, AgentEvent, run_agent_loop};
+        use sovereign_tools::default_registry;
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel::<AgentCommand>();
+
+        let registry = std::sync::Arc::new(default_registry());
+        let system_prompt = self.build_agent_system_prompt(&registry);
+        let client = std::sync::Arc::new(sovereign_api::OllamaClient::new());
+        let model = self.active_model().to_string();
+        let user_prompt = prompt.to_string();
+
+        // Send route info
+        let rag = if self.rag_enabled { " +RAG" } else { "" };
+        let _ = event_tx.send(AgentEvent::RouteInfo(format!(
+            "[Agent{rag}] via {model}"
+        )));
+
+        tokio::spawn(async move {
+            run_agent_loop(client, model, system_prompt, user_prompt, registry, event_tx, cmd_rx).await;
+        });
+
+        (event_rx, cmd_tx)
+    }
+
+    /// Build system prompt with tool descriptions + grimoire + RAG context
+    fn build_agent_system_prompt(&self, registry: &sovereign_tools::ToolRegistry) -> String {
+        let tool_desc = registry.system_prompt();
+
+        let grimoire_ctx = self.grimoire.as_ref()
+            .and_then(|g| g.recent(3).ok())
+            .filter(|p| !p.is_empty())
+            .map(|p| self.grimoire.as_ref().unwrap().format_for_context(&p))
+            .unwrap_or_default();
+
+        // RAG context is injected per-prompt, not in system prompt
+        // (would need async for embedding, so we keep it simple for now)
+        sovereign_core::agent_system_prompt(
+            self.hw.tier,
+            &tool_desc,
+            &grimoire_ctx,
+            "", // RAG context deferred to future enhancement
+        )
+    }
+
+    // ── Status ──
+
     pub fn status(&mut self) -> String {
         self.hw.refresh();
         let active = self.force_model.as_deref()

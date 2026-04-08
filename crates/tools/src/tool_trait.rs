@@ -68,6 +68,7 @@ impl ToolResult {
 // ────────────────────────────────────────────────────────
 
 /// Context passed to every tool execution
+#[derive(Clone)]
 pub struct ToolContext {
     pub working_dir: PathBuf,
 }

@@ -56,6 +56,34 @@ pub const REVIEW_CONTEXT_PREFIX: &str = "[Task: Security Review]\n\
 Analyze the code for vulnerabilities. Output a diff-style patch that fixes issues \
 while preserving functionality. Format: ```diff blocks.\n\n";
 
+/// Build a full agent system prompt with tool descriptions, grimoire, and RAG context.
+pub fn agent_system_prompt(
+    tier: PerformanceTier,
+    tool_descriptions: &str,
+    grimoire_context: &str,
+    rag_context: &str,
+) -> String {
+    let mut prompt = system_prompt_for_tier(tier).to_string();
+
+    // Tool descriptions (from ToolRegistry::system_prompt())
+    prompt.push_str(tool_descriptions);
+
+    // Grimoire — learned security patterns
+    if !grimoire_context.is_empty() {
+        prompt.push_str(grimoire_context);
+        prompt.push('\n');
+    }
+
+    // RAG — project-specific context
+    if !rag_context.is_empty() {
+        prompt.push_str("[Project Context]:\n");
+        prompt.push_str(rag_context);
+        prompt.push_str("\n\n");
+    }
+
+    prompt
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

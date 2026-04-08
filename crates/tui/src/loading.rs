@@ -45,6 +45,8 @@ pub enum LoadingState {
     Generating { elapsed_secs: u64 },
     Indexing { files_done: usize, files_total: usize },
     Scanning,
+    /// Agent is streaming tokens from Ollama
+    Streaming { tokens: usize },
 }
 
 /// Manages loading animation state
@@ -112,6 +114,12 @@ impl LoadingAnimation {
             }
             LoadingState::Scanning => {
                 format!("{} Scanning{}", self.spinner_char(), self.dots())
+            }
+            LoadingState::Streaming { tokens } => {
+                format!(
+                    "{} Streaming{} [{} tokens]  (Esc to cancel)",
+                    self.spinner_char(), self.dots(), tokens,
+                )
             }
         }
     }

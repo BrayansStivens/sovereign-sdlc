@@ -1,3 +1,3 @@
 pub mod client;
 
-pub use client::{OllamaClient, GenMetrics};
+pub use client::{OllamaClient, GenMetrics, StreamChunk};

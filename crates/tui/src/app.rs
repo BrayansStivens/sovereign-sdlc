@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use sovereign_core::{tui_refresh_ms, PerformanceTier};
-use sovereign_query::Coordinator;
+use sovereign_query::{AgentCommand, AgentEvent, Coordinator};
 use sovereign_tools::SecurityScanner;
+use sovereign_api::GenMetrics;
 
 use crate::buddy::Buddy;
 use crate::loading::{LoadingAnimation, LoadingState};
@@ -31,26 +32,7 @@ const GREEN_OK: Color = Color::Rgb(166, 227, 161);
 const YELLOW_WARN: Color = Color::Rgb(249, 226, 175);
 const MAUVE: Color = Color::Rgb(203, 166, 247);
 
-/// Messages from background tasks → TUI
-enum GenResult {
-    RouteInfo(String),
-    Response { text: String, summary: String },
-    Error(String),
-    /// Agent is thinking (show in chat)
-    AgentThink(String),
-    /// Agent wants to execute a command — needs approval
-    AgentNeedApproval { command: String, reason: String },
-    /// Agent read a file (informational)
-    AgentReadFile(String),
-    /// Agent finished its loop
-    AgentDone(String),
-}
-
-/// Approval response from TUI → Agent
-enum ApprovalResponse {
-    Approved,
-    Denied,
-}
+// AgentEvent and AgentCommand imported from sovereign_query
 
 /// Restore terminal to normal state (called on exit and panic)
 fn restore_terminal() {
@@ -123,9 +105,11 @@ pub async fn run_tui() -> Result<()> {
     let mut gen_start: Option<Instant> = None;
     let mut findings: (usize, usize, usize, usize) = (0, 0, 0, 0);
 
-    let (mut gen_tx, mut gen_rx) = mpsc::channel::<GenResult>(16);
-    let (mut approval_tx, mut approval_rx) = mpsc::channel::<ApprovalResponse>(1);
-    let mut waiting_agent_approval = false; // true when agent is paused waiting for y/n
+    // Agent channels — created per-session via coordinator.start_agent_session()
+    let mut agent_rx: Option<mpsc::UnboundedReceiver<AgentEvent>> = None;
+    let mut agent_cmd_tx: Option<mpsc::UnboundedSender<AgentCommand>> = None;
+    let mut streaming_buffer: Option<String> = None;
+    let mut streaming_tokens: usize = 0;
 
     let refresh_ms = tui_refresh_ms(coordinator.hw.tier);
     let anim_ms = match coordinator.hw.tier {
@@ -145,70 +129,111 @@ pub async fn run_tui() -> Result<()> {
         if last_anim.elapsed() >= Duration::from_millis(anim_ms) {
             loading.tick();
             buddy.tick();
-            if let Some(start) = gen_start {
+            if streaming_buffer.is_some() {
+                loading.set(LoadingState::Streaming { tokens: streaming_tokens });
+            } else if let Some(start) = gen_start {
                 loading.set(LoadingState::Generating { elapsed_secs: start.elapsed().as_secs() });
             }
             last_anim = Instant::now();
         }
 
-        // Check async results
-        while let Ok(result) = gen_rx.try_recv() {
-            match result {
-                GenResult::RouteInfo(info) => {
-                    messages.push(ChatMsg::route(info));
-                    loading.set(LoadingState::Thinking);
-                }
-                GenResult::Response { text, summary } => {
-                    buddy.on_code_audited(text.lines().count() as u64);
-                    messages.push(ChatMsg::route(summary));
-
-                    // Detect if response contains a shell command to execute
-                    if let Some(action) = detect_proposed_action(&text) {
-                        messages.push(ChatMsg::assistant(text));
-                        approval_state = ApprovalState::Pending { action, scroll: 0 };
-                    } else {
-                        messages.push(ChatMsg::assistant(text));
+        // Check agent events
+        {
+            let mut agent_done = false;
+            if let Some(ref mut rx) = agent_rx {
+                while let Ok(event) = rx.try_recv() {
+                    match event {
+                        AgentEvent::RouteInfo(info) => {
+                            messages.push(ChatMsg::route(info));
+                            loading.set(LoadingState::Streaming { tokens: 0 });
+                        }
+                        AgentEvent::StreamDelta(text) => {
+                            streaming_tokens += text.split_whitespace().count();
+                            if let Some(ref mut buf) = streaming_buffer {
+                                buf.push_str(&text);
+                            } else {
+                                streaming_buffer = Some(text);
+                            }
+                            auto_scroll = true;
+                        }
+                        AgentEvent::ToolStart { name, input_summary } => {
+                            if let Some(buf) = streaming_buffer.take() {
+                                if !buf.trim().is_empty() {
+                                    messages.push(ChatMsg::assistant(buf));
+                                }
+                            }
+                            streaming_tokens = 0;
+                            let summary = if input_summary.len() > 80 {
+                                format!("{}...", &input_summary[..80])
+                            } else {
+                                input_summary
+                            };
+                            messages.push(ChatMsg::route(format!("[tool] {name}: {summary}")));
+                            loading.set(LoadingState::Thinking);
+                        }
+                        AgentEvent::ToolEnd { name, output, is_error, duration_ms } => {
+                            let icon = if is_error { "[-]" } else { "[+]" };
+                            let truncated = if output.lines().count() > 20 {
+                                let first: String = output.lines().take(20).collect::<Vec<_>>().join("\n");
+                                format!("{first}\n... (truncated)")
+                            } else {
+                                output
+                            };
+                            messages.push(ChatMsg::system(format!(
+                                "{icon} {name} ({duration_ms}ms)\n{truncated}"
+                            )));
+                            loading.set(LoadingState::Streaming { tokens: streaming_tokens });
+                        }
+                        AgentEvent::ToolApprovalNeeded { tool_name, tool_input, permission } => {
+                            if let Some(buf) = streaming_buffer.take() {
+                                if !buf.trim().is_empty() {
+                                    messages.push(ChatMsg::assistant(buf));
+                                }
+                            }
+                            let is_dangerous = permission == sovereign_tools::PermissionLevel::Execute
+                                || permission == sovereign_tools::PermissionLevel::Dangerous;
+                            let working_dir = std::env::current_dir()
+                                .unwrap_or_else(|_| PathBuf::from("."))
+                                .to_string_lossy().to_string();
+                            approval_state = ApprovalState::Pending {
+                                action: ProposedAction::RunCommand {
+                                    command: format!("[{tool_name}] {tool_input}"),
+                                    working_dir,
+                                    is_dangerous,
+                                    danger_reason: Some(format!("Permission: {:?}", permission)),
+                                },
+                                scroll: 0,
+                            };
+                            loading.set(LoadingState::Idle);
+                        }
+                        AgentEvent::Done(metrics) => {
+                            if let Some(buf) = streaming_buffer.take() {
+                                if !buf.trim().is_empty() {
+                                    messages.push(ChatMsg::assistant(buf));
+                                }
+                            }
+                            streaming_tokens = 0;
+                            buddy.on_code_audited(metrics.eval_count);
+                            messages.push(ChatMsg::route(metrics.summary()));
+                            loading.set(LoadingState::Idle);
+                            gen_start = None;
+                            auto_scroll = true;
+                            agent_done = true;
+                        }
+                        AgentEvent::Error(e) => {
+                            streaming_buffer = None;
+                            streaming_tokens = 0;
+                            messages.push(ChatMsg::error(e));
+                            loading.set(LoadingState::Idle);
+                            gen_start = None;
+                            agent_done = true;
+                        }
                     }
-
-                    loading.set(LoadingState::Idle);
-                    gen_start = None;
-                    auto_scroll = true;
                 }
-                GenResult::Error(e) => {
-                    messages.push(ChatMsg::error(e));
-                    loading.set(LoadingState::Idle);
-                    gen_start = None;
-                }
-                GenResult::AgentThink(thought) => {
-                    messages.push(ChatMsg::route(format!("[think] {thought}")));
-                }
-                GenResult::AgentReadFile(path) => {
-                    messages.push(ChatMsg::route(format!("[read] {path}")));
-                }
-                GenResult::AgentNeedApproval { command, reason } => {
-                    // Show approval overlay for the command
-                    let (is_dangerous, danger_reason) = classify_command_risk(&command);
-                    let working_dir = std::env::current_dir()
-                        .unwrap_or_else(|_| PathBuf::from("."))
-                        .to_string_lossy().to_string();
-                    approval_state = ApprovalState::Pending {
-                        action: ProposedAction::RunCommand {
-                            command,
-                            working_dir,
-                            is_dangerous,
-                            danger_reason: danger_reason.or(Some(reason)),
-                        },
-                        scroll: 0,
-                    };
-                    waiting_agent_approval = true;
-                    loading.set(LoadingState::Idle); // pause spinner while waiting
-                }
-                GenResult::AgentDone(answer) => {
-                    messages.push(ChatMsg::assistant(answer));
-                    loading.set(LoadingState::Idle);
-                    gen_start = None;
-                    auto_scroll = true;
-                }
+            }
+            if agent_done {
+                agent_rx = None;
+                agent_cmd_tx = None;
             }
         }
 
@@ -254,7 +279,7 @@ pub async fn run_tui() -> Result<()> {
                 .split(h_split[1]);
 
             // ── Chat ──
-            render_chat(frame, &messages, auto_scroll, scroll_offset, h_split[0]);
+            render_chat(frame, &messages, streaming_buffer.as_deref(), auto_scroll, scroll_offset, h_split[0]);
 
             // ── Hardware ──
             render_hw(frame, cpu_pct, ram_pct, &tier, &active_model, sidebar[0]);
@@ -320,64 +345,19 @@ pub async fn run_tui() -> Result<()> {
                 if approval_state.is_pending() {
                     match key.code {
                         KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            if waiting_agent_approval {
-                                // Send approval to agent — it will execute and continue
-                                let _ = approval_tx.try_send(ApprovalResponse::Approved);
-                                // Also execute the command here so the agent gets the observation
-                                if let ApprovalState::Pending { action, .. } = &approval_state {
-                                    if let ProposedAction::RunCommand { command, working_dir, .. } = action {
-                                        match diff::execute_command(command, working_dir) {
-                                            Ok(result) => {
-                                                messages.push(ChatMsg::route(result.summary()));
-                                                if !result.stdout.is_empty() {
-                                                    messages.push(ChatMsg::system(result.stdout));
-                                                }
-                                            }
-                                            Err(e) => messages.push(ChatMsg::error(e)),
-                                        }
-                                    }
-                                }
-                                waiting_agent_approval = false;
-                                loading.set(LoadingState::Thinking); // agent continues
-                            } else {
-                                // Direct action (from LLM diff detection)
-                                if let ApprovalState::Pending { action, .. } = &approval_state {
-                                    match action {
-                                        ProposedAction::EditFile { path, new_content, .. } => {
-                                            match diff::apply_edit(path, new_content) {
-                                                Ok(()) => messages.push(ChatMsg::route(format!("[+] Applied edit to {path}"))),
-                                                Err(e) => messages.push(ChatMsg::error(format!("Failed: {e}"))),
-                                            }
-                                            buddy.on_auto_fix();
-                                        }
-                                        ProposedAction::RunCommand { command, working_dir, .. } => {
-                                            match diff::execute_command(command, working_dir) {
-                                                Ok(result) => {
-                                                    messages.push(ChatMsg::route(result.summary()));
-                                                    if !result.stdout.is_empty() {
-                                                        messages.push(ChatMsg::system(result.stdout));
-                                                    }
-                                                }
-                                                Err(e) => messages.push(ChatMsg::error(e)),
-                                            }
-                                        }
-                                        ProposedAction::CreateFile { path, content } => {
-                                            match diff::apply_edit(path, content) {
-                                                Ok(()) => messages.push(ChatMsg::route(format!("[+] Created {path}"))),
-                                                Err(e) => messages.push(ChatMsg::error(format!("Failed: {e}"))),
-                                            }
-                                        }
-                                    }
-                                }
+                            // Send approval to agent loop — it will execute the tool
+                            if let Some(ref tx) = agent_cmd_tx {
+                                let _ = tx.send(AgentCommand::Approve);
                             }
+                            loading.set(LoadingState::Streaming { tokens: streaming_tokens });
                             approval_state = ApprovalState::None;
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                            if waiting_agent_approval {
-                                let _ = approval_tx.try_send(ApprovalResponse::Denied);
-                                waiting_agent_approval = false;
-                                loading.set(LoadingState::Thinking);
+                            // Send denial to agent loop
+                            if let Some(ref tx) = agent_cmd_tx {
+                                let _ = tx.send(AgentCommand::Deny);
                             }
+                            loading.set(LoadingState::Streaming { tokens: streaming_tokens });
                             messages.push(ChatMsg::system("Action declined.".into()));
                             approval_state = ApprovalState::None;
                         }
@@ -449,77 +429,15 @@ pub async fn run_tui() -> Result<()> {
                                 gen_start = None;
                             }
                             prompt => {
-                                loading.set(LoadingState::Routing);
+                                // ── Start agent session (streaming + tools) ──
+                                loading.set(LoadingState::Streaming { tokens: 0 });
                                 gen_start = Some(Instant::now());
-                                let prompt = prompt.to_string();
-                                let tx = gen_tx.clone();
+                                streaming_buffer = None;
+                                streaming_tokens = 0;
 
-                                let (cat, model) = match coordinator.route_prompt(&prompt).await {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        messages.push(ChatMsg::error(format!("{e}")));
-                                        loading.set(LoadingState::Idle);
-                                        gen_start = None;
-                                        continue;
-                                    }
-                                };
-
-                                let rag = if coordinator.rag_enabled { " +RAG" } else { "" };
-                                let is_agentic = needs_agent(&prompt);
-                                let mode = if is_agentic { " Agent" } else { "" };
-                                let _ = tx.send(GenResult::RouteInfo(
-                                    format!("[{cat}{rag}{mode}] via {model}")
-                                )).await;
-
-                                // Build context
-                                let mut full = sovereign_core::system_prompt_for_tier(coordinator.hw.tier).to_string();
-                                if coordinator.rag_enabled {
-                                    if let Ok(emb) = coordinator.client.embed(sovereign_core::EMBEDDING_MODEL, &prompt).await {
-                                        let results = coordinator.memory.search(&emb, 5);
-                                        if !results.is_empty() {
-                                            full.push_str("[Context]:\n");
-                                            for r in &results {
-                                                let c = &r.chunk.content;
-                                                let safe_end = c.len().min(600);
-                                                let safe_end = (0..=safe_end).rev().find(|&i| c.is_char_boundary(i)).unwrap_or(0);
-                                                full.push_str(&format!("-- {} --\n{}\n",
-                                                    r.chunk.file_path.display(), &c[..safe_end]));
-                                            }
-                                            full.push('\n');
-                                        }
-                                    }
-                                }
-
-                                if is_agentic {
-                                    // ── Agent mode: ReAct loop with approval ──
-                                    let m = model.clone();
-                                    let approval_rx_for_agent = approval_rx;
-                                    // Create new approval channel for future use
-                                    let (new_atx, new_arx) = mpsc::channel::<ApprovalResponse>(1);
-                                    approval_tx = new_atx;
-                                    approval_rx = new_arx;
-
-                                    tokio::spawn(async move {
-                                        run_agent_loop(tx, approval_rx_for_agent, m, prompt, full).await;
-                                    });
-                                } else {
-                                    // ── Simple generation ──
-                                    full.push_str(&format!("User: {prompt}"));
-                                    let m = model.clone();
-                                    let client = sovereign_api::OllamaClient::new();
-                                    tokio::spawn(async move {
-                                        match client.generate_with_metrics(&m, &full).await {
-                                            Ok(metrics) => {
-                                                let summary = metrics.summary();
-                                                let _ = tx.send(GenResult::Response {
-                                                    text: metrics.response,
-                                                    summary,
-                                                }).await;
-                                            }
-                                            Err(e) => { let _ = tx.send(GenResult::Error(format!("{e}"))).await; }
-                                        }
-                                    });
-                                }
+                                let (rx, tx) = coordinator.start_agent_session(prompt);
+                                agent_rx = Some(rx);
+                                agent_cmd_tx = Some(tx);
                             }
                         }
                     }
@@ -573,16 +491,18 @@ pub async fn run_tui() -> Result<()> {
                     }
                     KeyCode::Esc => {
                         if loading.is_active() {
-                            // Cancel generation — drop the channel, stop waiting
+                            // Cancel agent — send Cancel command, drop channels
+                            if let Some(ref tx) = agent_cmd_tx {
+                                let _ = tx.send(AgentCommand::Cancel);
+                            }
+                            agent_rx = None;
+                            agent_cmd_tx = None;
+                            streaming_buffer = None;
+                            streaming_tokens = 0;
                             loading.set(LoadingState::Idle);
                             gen_start = None;
                             messages.push(ChatMsg::system("Generation cancelled.".into()));
-                            // Create fresh channel (old spawned task will fail to send)
-                            let (new_tx, new_rx) = mpsc::channel::<GenResult>(8);
-                            gen_tx = new_tx;
-                            gen_rx = new_rx;
                         }
-                        // Esc when idle does nothing — use Ctrl+C or /quit to exit
                     }
                     _ => {}
                 }
@@ -596,7 +516,7 @@ pub async fn run_tui() -> Result<()> {
 
 // ── Render helpers ──
 
-fn render_chat(frame: &mut Frame, messages: &[ChatMsg], auto_scroll: bool, scroll_offset: u16, area: Rect) {
+fn render_chat(frame: &mut Frame, messages: &[ChatMsg], streaming: Option<&str>, auto_scroll: bool, scroll_offset: u16, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     for msg in messages {
         let (icon, color) = match msg.role {
@@ -615,6 +535,22 @@ fn render_chat(frame: &mut Frame, messages: &[ChatMsg], auto_scroll: bool, scrol
             )));
         }
         lines.push(Line::from(""));
+    }
+
+    // Show streaming buffer as partial assistant message
+    if let Some(buf) = streaming {
+        if !buf.is_empty() {
+            lines.push(Line::from(Span::styled("  sov ", Style::default().fg(GREEN_OK).bold())));
+            for l in buf.lines() {
+                lines.push(Line::from(Span::styled(
+                    format!("  \u{2502} {l}"),
+                    Style::default().fg(TEXT),
+                )));
+            }
+            // Blinking cursor indicator
+            lines.push(Line::from(Span::styled("  \u{2502} \u{2588}", Style::default().fg(CYAN_ACCENT))));
+            lines.push(Line::from(""));
+        }
     }
 
     // Scroll calculation
@@ -673,6 +609,7 @@ fn render_status(frame: &mut Frame, loading: &LoadingAnimation, area: Rect) {
     let color = match loading.state {
         LoadingState::Thinking | LoadingState::Routing => INDIGO,
         LoadingState::Generating { .. } => RED_ALERT,
+        LoadingState::Streaming { .. } => CYAN_ACCENT,
         LoadingState::Indexing { .. } => YELLOW_WARN,
         LoadingState::Scanning => MAUVE,
         LoadingState::Idle => TEXT_DIM,
@@ -718,6 +655,7 @@ fn render_activity(frame: &mut Frame, loading: &LoadingAnimation, coord: &Coordi
         LoadingState::Routing => SentinelMood::Routing,
         LoadingState::Thinking => SentinelMood::Thinking,
         LoadingState::Generating { .. } => SentinelMood::Generating,
+        LoadingState::Streaming { .. } => SentinelMood::Generating,
         LoadingState::Indexing { .. } => SentinelMood::Indexing,
         LoadingState::Scanning => SentinelMood::Thinking,
     };
@@ -799,229 +737,8 @@ const HELP: &str = "Commands
 Scroll: Up/Down
 Approval: (y)es (n)o (e)xplain (Esc)cancel";
 
-/// Detect if a prompt needs the full ReAct agent (vs simple generation)
-fn needs_agent(prompt: &str) -> bool {
-    let lower = prompt.to_lowercase();
-    let signals = [
-        // File system questions
-        "carpeta", "directorio", "folder", "directory", "pwd", "where am i",
-        "en que carpeta", "que archivos", "what files", "list files", "ls",
-        // Action requests
-        "ejecuta", "execute", "run ", "corre ", "instala", "install",
-        "crea ", "create ", "borra ", "delete ", "mueve", "move",
-        // Investigation
-        "analiza", "analyze", "revisa", "check ", "investiga", "investigate",
-        "read the", "lee el", "mira el", "look at", "find the",
-        "que hay en", "what's in", "show me",
-        // Code actions
-        "fix ", "arregla", "debug", "compile", "build",
-    ];
-    signals.iter().any(|s| lower.contains(s))
-}
+// needs_agent() removed — all prompts now go through the agent loop
 
-/// The agent loop: single LLM call that MUST return a command or a direct answer.
-/// No separate classifier — the prompt forces the model to act.
-async fn run_agent_loop(
-    tx: mpsc::Sender<GenResult>,
-    mut approval_rx: mpsc::Receiver<ApprovalResponse>,
-    model: String,
-    prompt: String,
-    system_context: String,
-) {
-    let client = sovereign_api::OllamaClient::new();
-    let cwd = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .to_string_lossy().to_string();
+// run_agent_loop() removed — replaced by agent_loop.rs in sovereign-query
 
-    // ── Step 1: Force the LLM to give us a command ──
-    let _ = tx.send(GenResult::AgentThink("Deciding action...".into())).await;
-
-    let command_prompt = format!(
-        "You are a terminal assistant. You have FULL access to run commands on this computer.\n\
-         Current directory: {cwd}\n\n\
-         The user asked: \"{prompt}\"\n\n\
-         Reply with ONLY the terminal command needed to answer this. Nothing else.\n\
-         If no command is needed, reply with just the answer.\n\n\
-         Examples:\n\
-         Q: en que carpeta estamos?\n\
-         A: pwd\n\n\
-         Q: tenemos git instalado?\n\
-         A: which git\n\n\
-         Q: que archivos hay aqui?\n\
-         A: ls -la\n\n\
-         Q: lee el archivo Cargo.toml\n\
-         A: cat Cargo.toml\n\n\
-         Q: que version de rust tenemos?\n\
-         A: rustc --version\n\n\
-         Q: hola como estas?\n\
-         A: Hola! Estoy listo para ayudarte. Que necesitas?\n\n\
-         Q: {prompt}\n\
-         A:"
-    );
-
-    let step1 = match client.generate(&model, &command_prompt).await {
-        Ok(r) => r.trim().to_string(),
-        Err(e) => {
-            let _ = tx.send(GenResult::Error(format!("{e}"))).await;
-            return;
-        }
-    };
-
-    // Check if it looks like a command (short, no sentences, starts with common commands)
-    let is_command = step1.len() < 150
-        && !step1.contains(". ")
-        && !step1.starts_with("Hola")
-        && !step1.starts_with("I ")
-        && !step1.starts_with("El ")
-        && !step1.starts_with("La ")
-        && !step1.starts_with("No ")
-        && !step1.starts_with("Sure")
-        && !step1.starts_with("Here")
-        && step1.lines().count() <= 2;
-
-    if !is_command {
-        // LLM gave a direct answer — no command needed
-        let _ = tx.send(GenResult::AgentDone(step1)).await;
-        return;
-    }
-
-    // ── Step 2: Ask user for approval to run the command ──
-    let cmd = step1.lines().next().unwrap_or(&step1).trim().to_string();
-    let _ = tx.send(GenResult::AgentNeedApproval {
-        command: cmd.clone(),
-        reason: "To answer your question".into(),
-    }).await;
-
-    let cmd_output = match approval_rx.recv().await {
-        Some(ApprovalResponse::Approved) => {
-            match sovereign_core::diff::execute_command(&cmd, &cwd) {
-                Ok(r) => {
-                    let _ = tx.send(GenResult::AgentThink(format!("[+] {}", r.summary()))).await;
-                    if r.success { r.stdout } else { format!("Error: {}", r.stderr) }
-                }
-                Err(e) => {
-                    let _ = tx.send(GenResult::AgentThink(format!("[-] {e}"))).await;
-                    format!("Failed: {e}")
-                }
-            }
-        }
-        _ => {
-            let _ = tx.send(GenResult::AgentDone(
-                "Command denied. I can't answer without running it.".into()
-            )).await;
-            return;
-        }
-    };
-
-    // ── Step 3: Let LLM interpret the result naturally ──
-    let _ = tx.send(GenResult::AgentThink("Interpreting result...".into())).await;
-
-    let interpret_prompt = format!(
-        "{system_context}\n\
-         The user asked: \"{prompt}\"\n\n\
-         I ran `{cmd}` and got this output:\n\
-         ```\n{cmd_output}\n```\n\n\
-         Answer the user's question based on this output. Be concise and natural."
-    );
-
-    match client.generate_with_metrics(&model, &interpret_prompt).await {
-        Ok(metrics) => {
-            let _ = tx.send(GenResult::AgentThink(metrics.summary())).await;
-            let _ = tx.send(GenResult::AgentDone(metrics.response)).await;
-        }
-        Err(e) => {
-            // Fallback: just show the raw output
-            let _ = tx.send(GenResult::AgentDone(format!(
-                "$ {cmd}\n{cmd_output}"
-            ))).await;
-        }
-    }
-}
-
-/// Detect if LLM response contains a proposed action (edit or command)
-fn detect_proposed_action(response: &str) -> Option<ProposedAction> {
-    // Detect ```diff blocks → file edit
-    if let Some(diff_start) = response.find("```diff") {
-        let content_start = diff_start + 7;
-        if let Some(diff_end) = response[content_start..].find("```") {
-            let diff_block = response[content_start..content_start + diff_end].trim();
-
-            // Try to extract file path from --- a/path line
-            let file_path = diff_block.lines()
-                .find(|l| l.starts_with("--- a/") || l.starts_with("--- "))
-                .and_then(|l| l.strip_prefix("--- a/").or_else(|| l.strip_prefix("--- ")))
-                .unwrap_or("unknown_file")
-                .trim()
-                .to_string();
-
-            // Read current file if it exists
-            let old_content = std::fs::read_to_string(&file_path).unwrap_or_default();
-
-            // Try to extract new content from +++ lines
-            // For now, show the diff as-is and let user decide
-            let new_content = apply_diff_lines(&old_content, diff_block);
-            let diff = FileDiff::compute(&file_path, &old_content, &new_content);
-
-            if diff.has_changes() {
-                return Some(ProposedAction::EditFile {
-                    path: file_path,
-                    diff,
-                    new_content,
-                });
-            }
-        }
-    }
-
-    // Detect ```bash or ```sh blocks → command execution
-    for marker in &["```bash", "```sh", "```shell"] {
-        if let Some(cmd_start) = response.find(marker) {
-            let content_start = cmd_start + marker.len();
-            if let Some(cmd_end) = response[content_start..].find("```") {
-                let command = response[content_start..content_start + cmd_end].trim().to_string();
-
-                // Skip if it looks like an install instruction (ollama pull, apt, brew)
-                let lower = command.to_lowercase();
-                if lower.starts_with("ollama ") || lower.starts_with("brew ") || lower.starts_with("apt ") {
-                    continue;
-                }
-
-                if !command.is_empty() && command.lines().count() <= 3 {
-                    let (is_dangerous, danger_reason) = classify_command_risk(&command);
-                    let working_dir = std::env::current_dir()
-                        .unwrap_or_else(|_| PathBuf::from("."))
-                        .to_string_lossy().to_string();
-
-                    return Some(ProposedAction::RunCommand {
-                        command,
-                        working_dir,
-                        is_dangerous,
-                        danger_reason,
-                    });
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Simple diff application: take + lines from a diff block as the new content
-fn apply_diff_lines(old: &str, diff_block: &str) -> String {
-    let mut result = String::new();
-    let mut has_diff_lines = false;
-
-    for line in diff_block.lines() {
-        if line.starts_with('+') && !line.starts_with("+++") {
-            has_diff_lines = true;
-            result.push_str(line.strip_prefix('+').unwrap_or(line));
-            result.push('\n');
-        } else if line.starts_with(' ') {
-            has_diff_lines = true;
-            result.push_str(line.strip_prefix(' ').unwrap_or(line));
-            result.push('\n');
-        }
-    }
-
-    // If no diff-style lines found, return old content
-    if has_diff_lines { result } else { old.to_string() }
-}
+// detect_proposed_action() and apply_diff_lines() removed — replaced by agent tool system

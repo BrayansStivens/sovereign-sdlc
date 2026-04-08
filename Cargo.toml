@@ -49,6 +49,10 @@ chrono = "0.4"
 
 # Filesystem
 walkdir = "2"
+glob = "0.3"
+
+# Regex
+regex = "1"
 
 # Binary serialization (for vector index persistence)
 bincode = "1"
