@@ -12,58 +12,167 @@ use std::path::{Path, PathBuf};
 // Species & Animation Frames
 // ────────────────────────────────────────────────────────
 
-/// v0.4.0 species: Gato, Buho, Dragon, Fractal (backwards-compat with v0.2 species)
+/// v0.4.1 species: 11 creatures with multi-line ASCII art + dynamic eyes
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Species {
-    // v0.2 legacy (still loadable from old buddy.json)
-    Raven,
-    Golem,
-    Spirit,
-    // v0.4 evolved
-    Dragon,
     Gato,
     Buho,
+    Dragon,
     Fractal,
+    Cuervo,
+    Espiritu,
+    Golem,
+    Zorro,
+    Pulpo,
+    Robot,
+    Hongo,
+    // v0.2 legacy aliases (deserialize compat)
+    #[serde(alias = "Raven")]
+    Raven,
+    #[serde(alias = "Spirit")]
+    Spirit,
 }
 
+/// A 3-line sprite frame
+pub type SpriteLines = [&'static str; 3];
+
+/// Dynamic eye sets: (idle, blink, angry, sparkle, heart)
+struct EyeSet {
+    idle:    (&'static str, &'static str),
+    blink:   (&'static str, &'static str),
+    angry:   (&'static str, &'static str),
+    sparkle: (&'static str, &'static str),
+    heart:   (&'static str, &'static str),
+}
+
+const STANDARD_EYES: EyeSet = EyeSet {
+    idle:    ("^", "^"),
+    blink:   ("-", "-"),
+    angry:   (">", "<"),
+    sparkle: ("*", "*"),
+    heart:   ("<3", "3>"),
+};
+
 impl Species {
-    /// ASCII art frames: [idle_a, idle_b, angry]
-    pub fn frames(&self) -> (&'static str, &'static str, &'static str) {
+    /// Multi-line sprite: 3 states (idle, blink, angry), each 3 lines
+    pub fn frames(&self) -> (SpriteLines, SpriteLines, SpriteLines) {
         match self {
-            // v0.2 legacy
-            Species::Raven  => ("(o v o)", "(- v -)", "(O V O)"),
-            Species::Golem  => ("[O_O]",   "[o_o]",   "[X_X]"),
-            Species::Spirit => ("-{_}-",   "~{_}~",   "!{_}!"),
-            // v0.4 species
-            Species::Gato    => ("=^.^=",   "=^-^=",   "=>.<="),
-            Species::Buho    => ("(O,O)",   "(-,O)",   "(X,X)"),
-            Species::Dragon  => (r"(@\___", r"(O\___", r"(X\***"),
-            Species::Fractal => ("{*_*}",   "{~_~}",   "{!_!}"),
+            Species::Gato | Species::Raven => (
+                // Raven maps to Gato for backwards compat render
+                [r" /\_/\ ", "( ^.^ )", " > ^ < "],
+                [r" /\_/\ ", "( -.- )", " > ^ < "],
+                [r" /\_/\ ", "( o.o )", " > ^ < "],
+            ),
+            Species::Buho => (
+                ["  (O,O) ", " /(   )\\", "  ^^ ^^ "],
+                ["  (-,-) ", " /(   )\\", "  ^^ ^^ "],
+                ["  (o,o) ", " /(   )\\", "  ^^ ^^ "],
+            ),
+            Species::Dragon => (
+                [r" / \__ ", " (  ^ )>", r" /  _/ "],
+                [r" / \__ ", " (  - )>", r" /  _/ "],
+                [r" / \__ ", " (  o )>", r" /  _/ "],
+            ),
+            Species::Fractal => (
+                [" {*_*} ", "  / \\  ", " *   * "],
+                [" {~_~} ", "  / \\  ", " ~   ~ "],
+                [" {!_!} ", "  / \\  ", " !   ! "],
+            ),
+            Species::Cuervo => (
+                [" (v.v) ", " /| |\\", "  ^ ^  "],
+                [" (-.-) ", " /| |\\", "  ^ ^  "],
+                [" (V.V) ", " /| |\\", "  ^ ^  "],
+            ),
+            Species::Espiritu | Species::Spirit => (
+                // Spirit maps to Espiritu
+                ["  .-.  ", " (   ) ", "  |_|  "],
+                ["  ~.~  ", " (   ) ", "  |_|  "],
+                ["  !.!  ", " (   ) ", "  |_|  "],
+            ),
+            Species::Golem => (
+                [" [O_O] ", " /| |\\", " /   \\ "],
+                [" [-_-] ", " /| |\\", " /   \\ "],
+                [" [x_x] ", " /| |\\", " /   \\ "],
+            ),
+            Species::Zorro => (
+                [r" /\_/\ ", "( >.< )", " /   \\ "],
+                [r" /\_/\ ", "( -.- )", " /   \\ "],
+                [r" /\_/\ ", "( o.o )", " /   \\ "],
+            ),
+            Species::Pulpo => (
+                [" (ooo) ", "/| | |\\", " ~ ~ ~ "],
+                [" (---) ", "/| | |\\", " ~ ~ ~ "],
+                [" (***) ", "/| | |\\", " ~ ~ ~ "],
+            ),
+            Species::Robot => (
+                [" [::] ", "/|==|\\", " /  \\ "],
+                [" [--] ", "/|==|\\", " /  \\ "],
+                [" [oo] ", "/|==|\\", " /  \\ "],
+            ),
+            Species::Hongo => (
+                [" _===_ ", "( ^.^ )", " \\___/ "],
+                [" _===_ ", "( -.- )", " \\___/ "],
+                [" _===_ ", "( o.o )", " \\___/ "],
+            ),
+        }
+    }
+
+    /// Get a special eye variant based on rarity and mood tick
+    pub fn sparkle_frame(&self, tick: u64) -> Option<SpriteLines> {
+        // Sparkle eyes cycle: appear every 20 ticks for 4 ticks
+        if tick % 20 < 4 {
+            let (idle, _, _) = self.frames();
+            let mut sparkle = idle;
+            // Replace the face line (line 1) with sparkle eyes
+            sparkle[1] = match self {
+                Species::Gato | Species::Raven | Species::Zorro => "( *.* )",
+                Species::Buho     => "  (*,*) ",
+                Species::Hongo    => "( *.* )",
+                Species::Golem    => " [*_*] ",
+                Species::Robot    => " [**] ",
+                Species::Pulpo    => " (***) ",
+                Species::Dragon   => " (  * )>",
+                Species::Cuervo   => " (*.*) ",
+                _ => return None,
+            };
+            Some(sparkle)
+        } else {
+            None
         }
     }
 
     pub fn display_name(&self) -> &'static str {
         match self {
-            Species::Raven   => "Raven",
-            Species::Golem   => "Golem",
-            Species::Spirit  => "Spirit",
-            Species::Gato    => "Gato",
-            Species::Buho    => "Buho",
-            Species::Dragon  => "Dragon",
-            Species::Fractal => "Fractal",
+            Species::Gato     => "Gato",
+            Species::Buho     => "Buho",
+            Species::Dragon   => "Dragon",
+            Species::Fractal  => "Fractal",
+            Species::Cuervo   => "Cuervo",
+            Species::Espiritu => "Espiritu",
+            Species::Golem    => "Golem",
+            Species::Zorro    => "Zorro",
+            Species::Pulpo    => "Pulpo",
+            Species::Robot    => "Robot",
+            Species::Hongo    => "Hongo",
+            // Legacy display names
+            Species::Raven    => "Cuervo",
+            Species::Spirit   => "Espiritu",
         }
     }
 
-    /// v0.4 roll: prioritizes new species but legacy can still appear
     fn from_roll(roll: u32) -> Self {
         match roll {
-            0..=200   => Species::Gato,
-            201..=400 => Species::Buho,
-            401..=600 => Species::Dragon,
-            601..=800 => Species::Fractal,
-            801..=900 => Species::Raven,
-            901..=950 => Species::Spirit,
-            _         => Species::Golem,
+            0..=90    => Species::Gato,
+            91..=180  => Species::Buho,
+            181..=270 => Species::Dragon,
+            271..=360 => Species::Fractal,
+            361..=450 => Species::Cuervo,
+            451..=540 => Species::Espiritu,
+            541..=630 => Species::Golem,
+            631..=720 => Species::Zorro,
+            721..=810 => Species::Pulpo,
+            811..=900 => Species::Robot,
+            _         => Species::Hongo,
         }
     }
 }
@@ -370,22 +479,31 @@ impl Buddy {
         self.data.add_xp(25);
     }
 
-    /// Get the current animation frame
-    fn current_frame(&self) -> &'static str {
-        let (a, b, angry) = self.data.species.frames();
+    /// Get the current 3-line sprite frame
+    fn current_sprite(&self) -> SpriteLines {
+        let (idle, blink, angry) = self.data.species.frames();
+
+        // Sovereign rarity: sparkle eyes periodically
+        if self.data.rarity == Rarity::Sovereign {
+            if let Some(sparkle) = self.data.species.sparkle_frame(self.frame_tick) {
+                return sparkle;
+            }
+        }
+
         if self.mood == Mood::Angry {
-            // Vibrate: alternate between angry frame and offset
-            if self.frame_tick % 4 < 2 { angry } else { a }
+            if self.frame_tick % 4 < 2 { angry } else { idle }
         } else if self.mood == Mood::Exhausted {
-            // Golem special: show exhausted frame
-            if self.data.species == Species::Golem {
-                angry // [X_X] for exhausted golem
-            } else {
-                b
+            angry
+        } else if self.mood == Mood::Confused {
+            // Alternate all 3 states rapidly
+            match self.frame_tick % 9 {
+                0..=2 => idle,
+                3..=5 => blink,
+                _     => angry,
             }
         } else {
-            // Normal idle animation: alternate A/B
-            if self.frame_tick % 6 < 3 { a } else { b }
+            // Normal: idle <-> blink
+            if self.frame_tick % 8 < 5 { idle } else { blink }
         }
     }
 
@@ -393,118 +511,84 @@ impl Buddy {
     pub fn render(&self, frame: &mut Frame, area: Rect, ram_free_pct: u16) {
         let rarity_color = self.data.rarity.color();
         let mood_color = self.mood.color();
-        let sprite = self.current_frame();
+        let sprite = self.current_sprite();
 
         // Vibration offset for ANGRY mood
-        let name_display = if self.mood == Mood::Angry && self.frame_tick % 4 < 2 {
-            format!(" {} ", self.data.name)
+        let indent = if self.mood == Mood::Angry && self.frame_tick % 4 < 2 {
+            "   "
         } else {
-            self.data.name.clone()
+            "    "
         };
 
-        // XP progress bar
+        let name_display = &self.data.name;
+
+        // XP bar
         let xp_needed = self.data.xp_for_next_level();
         let xp_pct = if xp_needed > 0 {
             (self.data.xp as f32 / xp_needed as f32 * 10.0) as u16
-        } else {
-            0
-        };
+        } else { 0 };
         let xp_bar = format!(
             "[{}{}]",
             "#".repeat(xp_pct as usize),
             ".".repeat(10_usize.saturating_sub(xp_pct as usize)),
         );
 
-        // HP = uptime proxy (100 - cpu_pct, capped)
-        // MP = RAM free %
         let hp = 100u16.saturating_sub(ram_free_pct.min(100));
         let mp = ram_free_pct.min(100);
 
-        let hp_bar = stat_bar(hp, 8);
-        let mp_bar = stat_bar(mp, 8);
+        let mut lines = Vec::with_capacity(16);
 
-        let lines = vec![
-            // Sprite centered with mood color
-            Line::from(Span::styled(
-                format!("    {sprite}"),
+        // 3-line sprite
+        for sprite_line in &sprite {
+            lines.push(Line::from(Span::styled(
+                format!("{indent}{sprite_line}"),
                 Style::default().fg(mood_color).bold(),
-            )),
-            Line::from(""),
-            // Name + Rarity
-            Line::from(vec![
-                Span::styled(
-                    format!("  {name_display}"),
-                    Style::default().fg(rarity_color).bold(),
-                ),
-                Span::styled(
-                    format!(" [{}]", self.data.rarity.label()),
-                    Style::default().fg(rarity_color),
-                ),
-            ]),
-            // Species + Mood
-            Line::from(vec![
-                Span::styled(
-                    format!("  {} ", self.data.species.display_name()),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("({})", self.mood.label()),
-                    Style::default().fg(mood_color),
-                ),
-            ]),
-            Line::from(""),
-            // Level + XP
-            Line::from(vec![
-                Span::styled(
-                    format!("  LVL {:>2} ", self.data.level),
-                    Style::default().fg(Color::White).bold(),
-                ),
-                Span::styled(xp_bar, Style::default().fg(Color::Cyan)),
-            ]),
-            // Stats
-            Line::from(vec![
-                Span::styled("  HP  ", Style::default().fg(Color::Red)),
-                Span::styled(hp_bar, Style::default().fg(Color::Red)),
-            ]),
-            Line::from(vec![
-                Span::styled("  MP  ", Style::default().fg(Color::Blue)),
-                Span::styled(mp_bar, Style::default().fg(Color::Blue)),
-            ]),
-            Line::from(""),
-            // v0.4: Code Quality Radar
-            {
-                let (ql, qc) = self.quality_label();
-                Line::from(vec![
-                    Span::styled("  QA  ", Style::default().fg(qc).bold()),
-                    Span::styled(ql, Style::default().fg(qc)),
-                    Span::styled(
-                        format!(" ({}w/{}d)", self.data.clippy_warnings, self.data.tech_debt_score),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ])
-            },
-            // Lifetime stats
-            Line::from(Span::styled(
-                format!("  {} audited | {} fixes", self.data.lines_audited, self.data.auto_fixes),
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(Span::styled(
-                format!("  {} vulns caught", self.data.vulns_caught),
-                Style::default().fg(Color::DarkGray),
-            )),
-        ];
+            )));
+        }
 
-        let border_color = if self.mood == Mood::Angry {
-            Color::Red
-        } else {
-            rarity_color
-        };
+        // Name + Rarity
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {name_display}"), Style::default().fg(rarity_color).bold()),
+            Span::styled(format!(" [{}]", self.data.rarity.label()), Style::default().fg(rarity_color)),
+        ]));
 
-        let title = format!(
-            " {} — {} ",
-            self.data.species.display_name(),
-            self.data.rarity.label()
-        );
+        // Species + Mood
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {} ", self.data.species.display_name()), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("({})", self.mood.label()), Style::default().fg(mood_color)),
+        ]));
+
+        // Level + XP
+        lines.push(Line::from(vec![
+            Span::styled(format!("  LVL {:>2} ", self.data.level), Style::default().fg(Color::White).bold()),
+            Span::styled(xp_bar, Style::default().fg(Color::Cyan)),
+        ]));
+
+        // HP / MP
+        lines.push(Line::from(vec![
+            Span::styled("  HP ", Style::default().fg(Color::Red)),
+            Span::styled(stat_bar(hp, 7), Style::default().fg(Color::Red)),
+            Span::styled(" MP ", Style::default().fg(Color::Blue)),
+            Span::styled(stat_bar(mp, 7), Style::default().fg(Color::Blue)),
+        ]));
+
+        // Code Quality Radar
+        let (ql, qc) = self.quality_label();
+        lines.push(Line::from(vec![
+            Span::styled("  QA ", Style::default().fg(qc).bold()),
+            Span::styled(ql, Style::default().fg(qc)),
+            Span::styled(format!(" {}w/{}d", self.data.clippy_warnings, self.data.tech_debt_score), Style::default().fg(Color::DarkGray)),
+        ]));
+
+        // Lifetime stats
+        lines.push(Line::from(Span::styled(
+            format!("  {} aud | {} fix | {} vln", self.data.lines_audited, self.data.auto_fixes, self.data.vulns_caught),
+            Style::default().fg(Color::DarkGray),
+        )));
+
+        let border_color = if self.mood == Mood::Angry { Color::Red } else { rarity_color };
+
+        let title = format!(" {} — {} ", self.data.species.display_name(), self.data.rarity.label());
 
         let widget = Paragraph::new(lines).block(
             Block::default()
@@ -539,15 +623,27 @@ mod tests {
 
     #[test]
     fn test_species_from_roll_v04() {
-        // v0.4 new species
-        assert_eq!(Species::from_roll(100), Species::Gato);
-        assert_eq!(Species::from_roll(300), Species::Buho);
-        assert_eq!(Species::from_roll(500), Species::Dragon);
-        assert_eq!(Species::from_roll(700), Species::Fractal);
-        // Legacy species still accessible
-        assert_eq!(Species::from_roll(850), Species::Raven);
-        assert_eq!(Species::from_roll(930), Species::Spirit);
-        assert_eq!(Species::from_roll(980), Species::Golem);
+        assert_eq!(Species::from_roll(50), Species::Gato);
+        assert_eq!(Species::from_roll(150), Species::Buho);
+        assert_eq!(Species::from_roll(250), Species::Dragon);
+        assert_eq!(Species::from_roll(350), Species::Fractal);
+        assert_eq!(Species::from_roll(420), Species::Cuervo);
+        assert_eq!(Species::from_roll(500), Species::Espiritu);
+        assert_eq!(Species::from_roll(600), Species::Golem);
+        assert_eq!(Species::from_roll(700), Species::Zorro);
+        assert_eq!(Species::from_roll(750), Species::Pulpo);
+        assert_eq!(Species::from_roll(850), Species::Robot);
+        assert_eq!(Species::from_roll(950), Species::Hongo);
+    }
+
+    #[test]
+    fn test_all_species_count() {
+        // Ensure all 11 primary species are reachable via roll
+        let mut seen = std::collections::HashSet::new();
+        for roll in 0..=1000 {
+            seen.insert(Species::from_roll(roll).display_name());
+        }
+        assert!(seen.len() >= 11);
     }
 
     #[test]
@@ -637,11 +733,12 @@ mod tests {
     }
 
     #[test]
-    fn test_animation_frames() {
-        let (a, b, angry) = Species::Raven.frames();
-        assert_eq!(a, "(o v o)");
-        assert_eq!(b, "(- v -)");
-        assert_eq!(angry, "(O V O)");
+    fn test_multiline_frames() {
+        let (idle, blink, angry) = Species::Gato.frames();
+        assert_eq!(idle.len(), 3);
+        assert!(idle[1].contains("^.^"));
+        assert!(blink[1].contains("-.-"));
+        assert!(angry[1].contains("o.o"));
     }
 
     #[test]
@@ -671,22 +768,39 @@ mod tests {
     }
 
     #[test]
-    fn test_dragon_fire_frame() {
-        let (_, _, angry) = Species::Dragon.frames();
-        assert!(angry.contains("***")); // fire breath
+    fn test_all_species_have_3_line_frames() {
+        let all = [
+            Species::Gato, Species::Buho, Species::Dragon, Species::Fractal,
+            Species::Cuervo, Species::Espiritu, Species::Golem, Species::Zorro,
+            Species::Pulpo, Species::Robot, Species::Hongo,
+        ];
+        for species in &all {
+            let (idle, blink, angry) = species.frames();
+            assert_eq!(idle.len(), 3, "{:?} idle frame not 3 lines", species);
+            assert_eq!(blink.len(), 3, "{:?} blink frame not 3 lines", species);
+            assert_eq!(angry.len(), 3, "{:?} angry frame not 3 lines", species);
+        }
     }
 
     #[test]
-    fn test_v04_species_frames() {
-        let (a, b, _) = Species::Gato.frames();
-        assert!(a.contains("^.^"));
-        assert!(b.contains("^-^"));
+    fn test_sparkle_eyes() {
+        // Sovereign rarity triggers sparkle
+        let sparkle = Species::Gato.sparkle_frame(0);
+        assert!(sparkle.is_some());
+        assert!(sparkle.unwrap()[1].contains("*"));
 
-        let (a, _, _) = Species::Buho.frames();
-        assert!(a.contains("O,O"));
+        // Non-sparkle tick
+        let no_sparkle = Species::Gato.sparkle_frame(10);
+        assert!(no_sparkle.is_none());
+    }
 
-        let (a, _, _) = Species::Fractal.frames();
-        assert!(a.contains("*_*"));
+    #[test]
+    fn test_legacy_species_render() {
+        // Raven and Spirit should still work (mapped to Gato/Espiritu)
+        let (idle, _, _) = Species::Raven.frames();
+        assert_eq!(idle.len(), 3);
+        let (idle, _, _) = Species::Spirit.frames();
+        assert_eq!(idle.len(), 3);
     }
 
     #[test]
