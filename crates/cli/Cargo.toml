@@ -3,7 +3,7 @@ name = "sovereign-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Sovereign SDLC — CLI entry point"
+description = "Sovereign — CLI entry point"
 
 [[bin]]
 name = "sovereign"

@@ -567,7 +567,7 @@ fn render_chat(frame: &mut Frame, messages: &[ChatMsg], streaming: Option<&str>,
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(SURFACE_LIGHT))
-        .title(Span::styled(" Sovereign SDLC ", Style::default().fg(INDIGO).bold()));
+        .title(Span::styled(" Sovereign ", Style::default().fg(INDIGO).bold()));
     frame.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }).scroll((scroll_pos, 0)), area);
 }
 

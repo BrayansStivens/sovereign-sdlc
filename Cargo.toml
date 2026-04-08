@@ -13,7 +13,7 @@ resolver = "3"
 version = "0.5.0"
 edition = "2024"
 license = "MIT"
-description = "Sovereign SDLC — Local AI agent for secure software development"
+description = "Sovereign — Local AI agent for software development"
 
 [workspace.dependencies]
 # Async runtime

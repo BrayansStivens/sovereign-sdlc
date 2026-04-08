@@ -44,7 +44,7 @@ async fn run_repl() -> Result<()> {
     // ── Header ──
     println!();
     println!("  {CYAN}{BOLD}╔══════════════════════════════════════════════════╗{RESET}");
-    println!("  {CYAN}{BOLD}║{RESET}  {WHITE}{BOLD}Sovereign SDLC{RESET} {DIM}v{}{RESET}                          {CYAN}{BOLD}║{RESET}", env!("CARGO_PKG_VERSION"));
+    println!("  {CYAN}{BOLD}║{RESET}  {WHITE}{BOLD}Sovereign{RESET} {DIM}v{}{RESET}                          {CYAN}{BOLD}║{RESET}", env!("CARGO_PKG_VERSION"));
     println!("  {CYAN}{BOLD}║{RESET}  {DIM}Local AI Agent for Secure Development{RESET}         {CYAN}{BOLD}║{RESET}");
     println!("  {CYAN}{BOLD}╚══════════════════════════════════════════════════╝{RESET}");
     println!();

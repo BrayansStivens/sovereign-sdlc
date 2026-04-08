@@ -1,268 +1,251 @@
-# Sovereign SDLC
 
-A local AI agent that writes, edits, and audits code on your machine. No cloud. No API keys. No telemetry. Just you, your hardware, and an LLM that can actually touch your filesystem.
+<p align="center">
+  <br>
+  <code>sovereign</code>
+  <br>
+  <strong>Your code stays on your machine. So does your AI.</strong>
+  <br>
+  <br>
+</p>
 
-Built in Rust. Single binary. Runs on macOS, Linux, and Windows through [Ollama](https://ollama.com).
+<p align="center">
+  <a href="https://github.com/BrayansStivens/sovereign-sdlc/releases/latest">Download</a>
+  &nbsp;&middot;&nbsp;
+  <a href="#quick-start">Quick Start</a>
+  &nbsp;&middot;&nbsp;
+  <a href="#tools">Tools</a>
+  &nbsp;&middot;&nbsp;
+  <a href="#hardware-tiers">Hardware Tiers</a>
+</p>
 
 ---
 
-## How It Works
+Sovereign is a local AI coding agent. It connects to [Ollama](https://ollama.com), streams responses in real-time, and can read, search, edit, and create files on your behalf. It asks before it writes. It runs entirely offline. There is no cloud, no API key, no telemetry.
 
-You type a request. The agent streams a response token-by-token. If it needs to read a file, search your codebase, or run a command, it calls one of its 6 built-in tools automatically. You approve writes and executes; reads are instant. The result feeds back into the conversation and the agent continues until it has your answer.
+One binary. No Python, no Node, no Docker. Works on macOS, Linux, and Windows.
 
 ```
 you > what version of Rust is this project using?
 
   ~ [Agent] via qwen2.5:7b
 
-  sov  Let me check.
-
-  ~ [tool] read: {"path":"Cargo.toml"}
+  sov | Let me check.
+      |
+  ~ [tool] read: Cargo.toml
   [+] read (0ms)
-
-  sov  This project uses Rust edition 2024, with workspace version 0.5.0.
-       The Cargo.toml shows 6 workspace members under crates/.
-
+      |
+  sov | This project uses Rust edition 2024, workspace version 0.5.0.
+      | The Cargo.toml shows 6 crates under the workspace.
+      |
   [+] 4.1s | 892 tokens | 13.2 tok/s
 ```
-
-No prompt engineering required. The agent decides what tools to use based on your question.
 
 ---
 
 ## Quick Start
 
-### 1. Install Ollama
-
-Download from [ollama.com](https://ollama.com) and start the server:
+**1. Install Ollama** from [ollama.com](https://ollama.com), then:
 
 ```bash
 ollama serve
-```
-
-### 2. Pull a model
-
-```bash
-# Good default for most machines (4.7 GB)
 ollama pull qwen2.5:7b
-
-# Embeddings for RAG indexing (274 MB)
-ollama pull nomic-embed-text
 ```
 
-### 3. Run Sovereign
+**2. Download Sovereign** from the [latest release](https://github.com/BrayansStivens/sovereign-sdlc/releases/latest):
 
-**macOS / Linux**
+| Platform | Binary |
+|----------|--------|
+| macOS (Apple Silicon) | `sovereign-aarch64-apple-darwin` |
+| macOS (Intel) | `sovereign-x86_64-apple-darwin` |
+| Linux (x86_64) | `sovereign-x86_64-linux` |
+| Linux (ARM64) | `sovereign-aarch64-linux` |
+| Windows | `sovereign-x86_64-windows.exe` |
+
+**3. Run it**
+
 ```bash
-# Download from https://github.com/BrayansStivens/sovereign-sdlc/releases/latest
-chmod +x sovereign
-./sovereign
+# macOS / Linux
+chmod +x sovereign-*
+./sovereign-aarch64-apple-darwin
 ```
 
-**Windows (PowerShell)**
 ```powershell
-# Download sovereign.exe from Releases
-.\sovereign.exe
+# Windows
+.\sovereign-x86_64-windows.exe
 ```
 
-**Build from source (any platform)**
-```bash
-git clone https://github.com/BrayansStivens/sovereign-sdlc.git
-cd sovereign-sdlc
-cargo build --release
-# Binary at: target/release/sovereign (or sovereign.exe on Windows)
-```
+That's it. No Rust, no compiler, no dependencies beyond Ollama.
 
 ---
 
 ## Two Modes
 
-### TUI (default)
+**TUI** -- full terminal interface with streaming, hardware monitor, and buddy companion:
 
 ```bash
 sovereign
 ```
 
-Full terminal interface. Three panels: chat on the left, hardware monitor + buddy companion on the right. Streaming text, tool execution indicators, approval overlays.
-
-### REPL
+**REPL** -- lightweight, works over SSH, inside containers, or piped:
 
 ```bash
 sovereign --repl
 ```
 
-Lightweight mode. Same agent loop, same tools, same streaming — just plain text in your terminal. Works everywhere, including inside other tools and over SSH.
+Both use the same agent loop, same tools, same streaming engine.
 
 ---
 
 ## Tools
 
-The agent has 6 tools it can call during a conversation. Read-only tools execute instantly. Write and execute tools ask for your approval first.
+The agent has 6 tools. It decides when to use them based on your request. Read-only tools run instantly. Writes and executes ask for your approval.
 
-| Tool | Permission | What It Does |
-|------|-----------|--------------|
-| `bash` | Execute | Run shell commands. Persistent working directory across calls. Timeout: 120s default, 600s max. Output capped at 100K chars |
-| `read` | ReadOnly | Read files with line numbers. Supports offset/limit for large files (default: 2000 lines) |
-| `glob` | ReadOnly | Find files by pattern. `**/*.rs`, `src/**/*.ts`, or plain filenames for recursive search |
-| `grep` | ReadOnly | Regex search across files. Three output modes: file paths, matching lines, or match counts. Filter by file type or glob |
-| `edit` | Write | Replace text in files. Rejects ambiguous matches unless `replace_all` is set. You must approve before it writes |
-| `write` | Write | Create or overwrite files. Auto-creates parent directories |
+| Tool | Permission | Description |
+|------|-----------|-------------|
+| `bash` | Execute | Run shell commands. Working directory persists between calls |
+| `read` | ReadOnly | Read files with line numbers. Offset and limit for large files |
+| `glob` | ReadOnly | Find files by pattern. Recursive search for plain names |
+| `grep` | ReadOnly | Regex search across files. Filter by type, glob, or context lines |
+| `edit` | Write | Replace text in files. Validates uniqueness before writing |
+| `write` | Write | Create or overwrite files. Creates parent directories |
 
-The agent can chain multiple tool calls in a single conversation. It reads a file, greps for a pattern, edits the match, and verifies the change — all in one flow.
+Tools chain naturally. The agent reads a file, greps for a pattern, edits the match, and verifies -- all in one conversation.
 
 ---
 
 ## Commands
 
-Type these in the chat prompt:
-
-| Command | What It Does |
+| Command | Description |
 |---------|-------------|
-| `/model <name>` | Switch LLM model. SafeLoad checks it fits in RAM first |
-| `/index [path]` | Index a project for RAG. Scans, chunks, embeds with nomic-embed-text. Skips secrets, binaries, node_modules |
-| `/scan [path]` | Run security scan (semgrep, cargo-audit, clippy) |
-| `/status` | Hardware tier, active model, RAM/CPU, RAG stats, Grimoire patterns |
-| `/buddy` | Companion stats: species, rarity, level, XP |
-| `/help` | Show all commands |
+| `/model <name>` | Switch LLM. SafeLoad checks it fits in RAM |
+| `/index [path]` | Index project for RAG. Embeds with nomic-embed-text |
+| `/scan [path]` | Security scan with semgrep, cargo-audit, clippy |
+| `/status` | Hardware, model, RAM, RAG and Grimoire stats |
+| `/buddy` | Companion species, rarity, level, XP |
+| `/help` | All commands |
 | `/quit` | Save and exit |
 
-### Keyboard (TUI)
-
-| Key | Action |
-|-----|--------|
-| Enter | Submit prompt |
-| Esc | Cancel active generation |
-| Up/Down | Scroll chat |
-| Ctrl+C | Quit |
-| Ctrl+Z | Suspend to background (Unix) |
-| y/n | Approve or deny tool execution |
+**Keyboard (TUI):** Enter to submit, Esc to cancel, Up/Down to scroll, y/n to approve tools, Ctrl+C to quit.
 
 ---
 
 ## Hardware Tiers
 
-Sovereign detects your hardware at startup. No configuration needed.
+Sovereign detects your hardware at startup and picks models automatically.
 
-| Tier | RAM Available | Dev Model | Audit Model |
-|------|-------------|-----------|-------------|
-| **HighEnd** | 20+ GB | qwen2.5-coder:14b | deepseek-r1:14b |
-| **Medium** | 12-20 GB | qwen2.5-coder:7b | deepseek-r1:7b |
-| **Small** | 8-12 GB | qwen2.5-coder:3b | phi-4:mini |
-| **ExtraSmall** | <8 GB | llama3.2:3b | phi-4:mini |
+| Tier | RAM | Dev Model | Audit Model |
+|------|-----|-----------|-------------|
+| HighEnd | 20+ GB | qwen2.5-coder:14b | deepseek-r1:14b |
+| Medium | 12-20 GB | qwen2.5-coder:7b | deepseek-r1:7b |
+| Small | 8-12 GB | qwen2.5-coder:3b | phi-4:mini |
+| ExtraSmall | <8 GB | llama3.2:3b | phi-4:mini |
 
-Pull models for your tier:
+Supported platforms: Apple Silicon (unified memory), NVIDIA (CUDA), AMD/Intel (Vulkan), CPU-only.
+
+**SafeLoad** prevents OOM: if `model_weight + 4 GB > available_RAM`, Sovereign blocks the load and suggests a lighter alternative.
+
+### Pull models for your machine
 
 ```bash
-# High-end (20+ GB)
-ollama pull qwen2.5-coder:14b && ollama pull deepseek-r1:14b && ollama pull nomic-embed-text
+# High-end (20+ GB free RAM)
+ollama pull qwen2.5-coder:14b && ollama pull deepseek-r1:14b
 
 # Mid-range (8-16 GB)
-ollama pull qwen2.5:7b && ollama pull nomic-embed-text
+ollama pull qwen2.5:7b
 
 # Lightweight (any machine)
-ollama pull llama3.2:3b && ollama pull nomic-embed-text
+ollama pull llama3.2:3b
+
+# Always needed for RAG
+ollama pull nomic-embed-text
 ```
-
-### Platform Detection
-
-| Platform | How It Detects | What Happens |
-|----------|---------------|--------------|
-| Apple Silicon | CPU brand, unified memory | Full RAM available for models |
-| NVIDIA GPU | CUDA / NVML | Layers offloaded to VRAM |
-| AMD/Intel GPU | Vulkan detection | Partial VRAM offload |
-| CPU only | Fallback | Smaller models, lower refresh rate |
-
-### SafeLoad
-
-Before loading any model, Sovereign checks `model_weight + 4 GB < available_RAM`. If it fails, it suggests a quantized alternative. No OOM crashes.
 
 ---
 
 ## RAG
 
-```bash
-sovereign --repl
+Index your project and Sovereign injects relevant code as context into every prompt.
+
+```
 > /index .
-# Scans project -> chunks files -> embeds with nomic-embed-text
-# Persists to .sovereign/index.bin
+  Indexed 42 files -> 186 chunks (tier: HighEnd, batch: 32)
 
 > how does the authentication middleware work?
-# Agent retrieves relevant code chunks as context before answering
+  ~ [Agent +RAG] via qwen2.5-coder:14b
 ```
 
-The indexer skips `.env`, credentials, API keys, certificates, binaries, `node_modules/`, `target/`, `.git/`, and anything in `.gitignore`.
+The indexer skips `.env`, secrets, API keys, binaries, `node_modules/`, `target/`, `.git/`, and `.gitignore` entries.
 
 ---
 
-## Security Pipeline
+## Security
 
-| Tool | Type | Checks |
-|------|------|--------|
+| Tool | Type | What It Checks |
+|------|------|----------------|
 | Semgrep | SAST | OWASP Top 10, injection, XSS, hardcoded secrets |
 | cargo-audit | SCA | Known CVEs in Rust dependencies |
-| Clippy | Lint | Unsafe patterns, logic bugs, Rust idioms |
+| Clippy | Lint | Unsafe patterns, logic bugs |
 
-Install them (optional — Sovereign works without them):
+Install them if you want (Sovereign works without them):
 
 ```bash
 pip install semgrep
 cargo install cargo-audit
 ```
 
-When a critical vulnerability is found, the agent can generate a fix patch and store the pattern in the Grimoire (SQLite) for future reference.
+When a critical vulnerability is found, the agent generates a fix and stores the pattern in the **Grimoire** for future context.
 
 ---
 
 ## Buddy System
 
-Every project gets a companion. 11 species, 5 rarity tiers (Common to Sovereign), reactive moods based on system load. They earn XP when you audit code and level up over time. Run `/buddy` to check yours.
+Every project gets a companion. 11 species, 5 rarity tiers, moods that react to your system load. They gain XP when you audit code. `/buddy` to check yours.
 
 ---
 
 ## Project Data
 
-Stored per-project in `.sovereign/`:
+Per-project state in `.sovereign/`:
 
 ```
 .sovereign/
-  index.bin      RAG vector store
-  buddy.json     Companion state
-  grimoire.db    Security patterns (SQLite)
-  history.db     Session history (SQLite, SHA-256 signed)
+  index.bin      # RAG embeddings
+  buddy.json     # Companion state
+  grimoire.db    # Learned security patterns
+  history.db     # Session logs (SHA-256 signed)
 ```
 
-Add `.sovereign/` to your `.gitignore`.
+Add `.sovereign/` to `.gitignore`.
 
 ---
 
 ## Architecture
 
 ```
-sovereign-sdlc/
-  crates/
-    core/     Hardware detection, RAG, grimoire, sessions, system prompts
-    api/      Ollama client — streaming chat, embeddings, model listing
-    tools/    6 agent tools + security scanner (semgrep, cargo-audit, clippy)
-    query/    Agent loop, smart router, coordinator, context compression
-    tui/      Terminal UI + buddy system + approval overlay
-    cli/      Binary entry point (TUI + REPL modes)
+crates/
+  core/     Hardware detection, RAG, grimoire, system prompts
+  api/      Ollama client -- streaming chat, embeddings
+  tools/    6 agent tools + security scanner
+  query/    Agent loop, router, coordinator, compression
+  tui/      Terminal interface + buddy + approval overlay
+  cli/      Entry point (TUI and REPL modes)
 ```
 
-134 tests. ~10,000 lines of Rust. Single binary, no runtime dependencies beyond Ollama.
+134 tests. ~10,000 lines of Rust. Single binary.
 
 ---
 
-## Building for Windows
+## Build from Source
 
-```powershell
+Only needed if you want to hack on Sovereign itself or your platform isn't in the releases.
+
+```bash
 # Install Rust: https://rustup.rs
 git clone https://github.com/BrayansStivens/sovereign-sdlc.git
 cd sovereign-sdlc
 cargo build --release
-# Binary at: target\release\sovereign.exe
+./target/release/sovereign
 ```
-
-The TUI uses crossterm which supports Windows Terminal, PowerShell, and cmd.exe natively. ConPTY is used for proper ANSI rendering on Windows 10+.
 
 ---
 
