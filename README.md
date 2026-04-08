@@ -1,8 +1,8 @@
 # Sovereign-SDLC
 
-Local AI agent for secure software development. Runs 100% offline with Ollama. Hardware-adaptive — works on a MacBook M5 (full power) or an office laptop with no GPU (lightweight mode).
+Local AI agent for secure software development. Runs 100% offline with Ollama. Hardware-adaptive — automatically detects your system capabilities and selects the right models, whether you have a high-end workstation with a GPU or a basic office laptop with just a CPU.
 
-Built in Rust. Single binary. No Python, no Node, no Docker required.
+Cross-platform: macOS, Linux, Windows. Built in Rust. Single binary. No Python, no Node, no Docker required.
 
 ## What It Does
 
@@ -23,29 +23,29 @@ Built in Rust. Single binary. No Python, no Node, no Docker required.
 
 ### Pre-built Binary (No Rust Required)
 
-Download from [Releases](../../releases/latest):
-
-| Platform | File |
-|---|---|
-| macOS (Apple Silicon) | `sovereign-aarch64-apple-darwin` |
-| macOS (Intel) | `sovereign-x86_64-apple-darwin` |
-| Linux (x86_64) | `sovereign-x86_64-unknown-linux-gnu` |
-| Windows | `sovereign-x86_64-pc-windows-msvc.exe` |
+Download from [Releases](../../releases/latest) the binary for your platform.
 
 ```bash
-# macOS / Linux
+# macOS / Linux — make it executable and run
 chmod +x sovereign-*
-./sovereign-aarch64-apple-darwin
+./sovereign-*
 
-# Or move to PATH
+# Or move to your PATH for global access
 sudo mv sovereign-* /usr/local/bin/sovereign
 sovereign
 ```
 
+```powershell
+# Windows — just run it
+.\sovereign-x86_64-pc-windows-msvc.exe
+```
+
+> **Note:** Pre-built binaries are added as they become available. If your platform isn't listed yet, build from source (see below).
+
 ### Build from Source
 
 ```bash
-git clone https://github.com/YOUR_USER/sovereign-sdlc.git
+git clone https://github.com/BrayansStivens/sovereign-sdlc.git
 cd sovereign-sdlc
 cargo build --release
 ./target/release/sovereign
@@ -103,37 +103,41 @@ Simple terminal interface without the TUI panels.
 
 ## Hardware Tiers
 
-Sovereign detects your hardware at startup and adapts automatically:
+Sovereign detects your hardware at startup and adapts automatically. No configuration needed.
 
-| Tier | RAM Available | Dev Model | Audit Model | Context | Animation |
+| Tier | When It Activates | Dev Model | Audit Model | Context | TUI FPS |
 |---|---|---|---|---|---|
-| **HighEnd** | 20+ GB | `qwen2.5-coder:14b` | `deepseek-r1:14b` | 64k tokens | 10 FPS |
-| **Medium** | 12-20 GB | `qwen2.5-coder:7b` | `deepseek-r1:7b` | 32k tokens | 4 FPS |
-| **Small** | 8-12 GB | `qwen2.5-coder:3b` | `phi-4:mini` | 16k tokens | 2 FPS |
-| **ExtraSmall** | <8 GB | `llama3.2:3b` | `phi-4:mini` | 8k tokens | 1 FPS |
+| **HighEnd** | 20+ GB free RAM (or GPU with 16+ GB VRAM) | `qwen2.5-coder:14b` | `deepseek-r1:14b` | 64k tokens | 10 |
+| **Medium** | 12-20 GB free RAM | `qwen2.5-coder:7b` | `deepseek-r1:7b` | 32k tokens | 4 |
+| **Small** | 8-12 GB free RAM | `qwen2.5-coder:3b` | `phi-4:mini` | 16k tokens | 2 |
+| **ExtraSmall** | <8 GB free RAM (CPU only) | `llama3.2:3b` | `phi-4:mini` | 8k tokens | 1 |
 
-### Pull Models for Your Tier
+### Pull Models for Your System
 
 ```bash
-# HighEnd (MacBook M5, RTX GPU)
+# If you have 20+ GB RAM or a dedicated GPU
 ollama pull qwen2.5-coder:14b
 ollama pull deepseek-r1:14b
 ollama pull nomic-embed-text
 
-# Small / ExtraSmall (Office laptop, no GPU)
-ollama pull llama3.2:3b
+# If you have 8-12 GB RAM or no GPU
+ollama pull qwen2.5-coder:3b
 ollama pull phi-4:mini
+ollama pull nomic-embed-text
+
+# Minimum viable (any machine)
+ollama pull llama3.2:3b
 ollama pull nomic-embed-text
 ```
 
 ### Platform Detection
 
-| Platform | Detection Method |
-|---|---|
-| Apple Silicon (M1-M5) | CPU brand string, unified memory sizing |
-| NVIDIA GPU | NVML dynamic library probing (CUDA) |
-| AMD/Intel GPU | Vulkan library detection |
-| CPU Only | Fallback — aggressive threading, lightweight models |
+| Platform | Detection Method | Optimization |
+|---|---|---|
+| Apple Silicon | CPU brand string, unified memory | Full memory available for models |
+| NVIDIA GPU (Linux/Windows) | NVML dynamic library (CUDA) | Model layers offloaded to VRAM |
+| AMD/Intel GPU (Linux/Windows) | Vulkan library detection | Partial VRAM offload |
+| CPU Only (any OS) | Automatic fallback | Aggressive threading, lightweight models, lower TUI refresh |
 
 ### SafeLoad Guard
 
