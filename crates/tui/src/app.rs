@@ -147,24 +147,11 @@ pub async fn run_tui() -> Result<()> {
                             messages.push(ChatMsg::route(info));
                             loading.set(LoadingState::Streaming { tokens: 0 });
                         }
-                        AgentEvent::StreamDelta(text) => {
-                            streaming_tokens += text.split_whitespace().count();
-                            if let Some(ref mut buf) = streaming_buffer {
-                                buf.push_str(&text);
-                            } else {
-                                streaming_buffer = Some(text);
-                            }
+                        AgentEvent::TextResponse(text) => {
+                            messages.push(ChatMsg::assistant(text));
                             auto_scroll = true;
                         }
                         AgentEvent::ToolStart { name, input_summary } => {
-                            if let Some(buf) = streaming_buffer.take() {
-                                // Strip the ```tool JSON block from display
-                                let clean = strip_tool_block(&buf);
-                                if !clean.trim().is_empty() {
-                                    messages.push(ChatMsg::assistant(clean));
-                                }
-                            }
-                            streaming_tokens = 0;
                             let summary = if input_summary.len() > 80 {
                                 format!("{}...", &input_summary[..80])
                             } else {
@@ -184,14 +171,9 @@ pub async fn run_tui() -> Result<()> {
                             messages.push(ChatMsg::system(format!(
                                 "{icon} {name} ({duration_ms}ms)\n{truncated}"
                             )));
-                            loading.set(LoadingState::Streaming { tokens: streaming_tokens });
+                            loading.set(LoadingState::Thinking);
                         }
                         AgentEvent::ToolApprovalNeeded { tool_name, tool_input, permission } => {
-                            if let Some(buf) = streaming_buffer.take() {
-                                if !buf.trim().is_empty() {
-                                    messages.push(ChatMsg::assistant(buf));
-                                }
-                            }
                             let is_dangerous = permission == sovereign_tools::PermissionLevel::Execute
                                 || permission == sovereign_tools::PermissionLevel::Dangerous;
                             let working_dir = std::env::current_dir()
@@ -209,13 +191,6 @@ pub async fn run_tui() -> Result<()> {
                             loading.set(LoadingState::Idle);
                         }
                         AgentEvent::Done(metrics) => {
-                            if let Some(buf) = streaming_buffer.take() {
-                                let clean = strip_tool_block(&buf);
-                                if !clean.trim().is_empty() {
-                                    messages.push(ChatMsg::assistant(clean));
-                                }
-                            }
-                            streaming_tokens = 0;
                             buddy.on_code_audited(metrics.eval_count);
                             messages.push(ChatMsg::route(metrics.summary()));
                             loading.set(LoadingState::Idle);
@@ -224,8 +199,6 @@ pub async fn run_tui() -> Result<()> {
                             agent_done = true;
                         }
                         AgentEvent::Error(e) => {
-                            streaming_buffer = None;
-                            streaming_tokens = 0;
                             messages.push(ChatMsg::error(e));
                             loading.set(LoadingState::Idle);
                             gen_start = None;

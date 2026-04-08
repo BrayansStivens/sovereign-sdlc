@@ -198,7 +198,6 @@ async fn run_repl() -> Result<()> {
                 use sovereign_query::AgentEvent;
 
                 let (mut event_rx, _cmd_tx) = coord.start_agent_session(prompt);
-                let mut streaming = false;
 
                 while let Some(event) = event_rx.recv().await {
                     match event {
@@ -206,23 +205,13 @@ async fn run_repl() -> Result<()> {
                             println!("  {DIM}{info}{RESET}");
                             println!();
                         }
-                        AgentEvent::StreamDelta(text) => {
-                            if !streaming {
-                                print!("  {GRAY}│{RESET} ");
-                                streaming = true;
+                        AgentEvent::TextResponse(text) => {
+                            for line in text.lines() {
+                                println!("  {GRAY}│{RESET} {line}");
                             }
-                            // Handle newlines in delta
-                            for (i, part) in text.split('\n').enumerate() {
-                                if i > 0 {
-                                    println!();
-                                    print!("  {GRAY}│{RESET} ");
-                                }
-                                print!("{part}");
-                            }
-                            io::stdout().flush().ok();
+                            println!("  {GRAY}│{RESET}");
                         }
                         AgentEvent::ToolStart { name, input_summary } => {
-                            if streaming { println!(); streaming = false; }
                             let summary = if input_summary.len() > 60 {
                                 format!("{}...", &input_summary[..60])
                             } else {
@@ -243,7 +232,6 @@ async fn run_repl() -> Result<()> {
                             println!();
                         }
                         AgentEvent::ToolApprovalNeeded { tool_name, tool_input, permission } => {
-                            if streaming { println!(); streaming = false; }
                             println!("  {YELLOW}{BOLD}Tool needs approval:{RESET}");
                             println!("  {WHITE}{tool_name}{RESET}: {DIM}{tool_input}{RESET}");
                             println!("  {DIM}Permission: {permission:?}{RESET}");
@@ -258,14 +246,11 @@ async fn run_repl() -> Result<()> {
                             }
                         }
                         AgentEvent::Done(metrics) => {
-                            if streaming { println!(); }
-                            println!("  {GRAY}│{RESET}");
                             println!("  {DIM}{}{RESET}", metrics.summary());
                             buddy.on_code_audited(metrics.eval_count);
                             break;
                         }
                         AgentEvent::Error(e) => {
-                            if streaming { println!(); }
                             println!("  {RED}Error:{RESET} {e}");
                             println!("  {DIM}Is Ollama running? Try: ollama serve{RESET}");
                             break;

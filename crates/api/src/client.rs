@@ -118,6 +118,74 @@ impl OllamaClient {
         Ok((response.message.content, metrics))
     }
 
+    /// Chat with native tool calling — Ollama returns structured tool_calls
+    /// instead of relying on text-based ```tool parsing.
+    /// Uses reqwest directly for full control over the tools JSON.
+    pub async fn chat_with_native_tools(
+        &self,
+        model: &str,
+        messages: &[ConversationMessage],
+        tools: &[serde_json::Value],
+    ) -> Result<NativeToolResponse> {
+        let http = reqwest::Client::new();
+
+        let ollama_msgs: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": m.role.to_string(),
+                    "content": m.content,
+                })
+            })
+            .collect();
+
+        let body = serde_json::json!({
+            "model": model,
+            "messages": ollama_msgs,
+            "tools": tools,
+            "stream": false,
+        });
+
+        let resp = http
+            .post("http://localhost:11434/api/chat")
+            .json(&body)
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+
+        let content = resp["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
+        let tool_calls: Vec<NativeToolCall> = resp["message"]["tool_calls"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|tc| {
+                        let name = tc["function"]["name"].as_str()?.to_string();
+                        let arguments = tc["function"]["arguments"].clone();
+                        Some(NativeToolCall { name, arguments })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let metrics = GenMetrics {
+            response: content.clone(),
+            eval_count: resp["eval_count"].as_u64().unwrap_or(0),
+            prompt_eval_count: resp["prompt_eval_count"].as_u64().unwrap_or(0),
+            total_duration_ns: resp["total_duration"].as_u64().unwrap_or(0),
+        };
+
+        Ok(NativeToolResponse {
+            content,
+            tool_calls,
+            metrics,
+        })
+    }
+
     /// Streaming chat — sends messages and returns a channel that receives
     /// token deltas as they arrive. The final chunk is `StreamChunk::Done`
     /// with metrics.
@@ -204,6 +272,138 @@ impl OllamaClient {
 
     pub fn inner(&self) -> &Ollama {
         &self.inner
+    }
+}
+
+/// Response from native tool calling
+#[derive(Debug, Clone)]
+pub struct NativeToolResponse {
+    pub content: String,
+    pub tool_calls: Vec<NativeToolCall>,
+    pub metrics: GenMetrics,
+}
+
+/// A tool call returned by Ollama's native API
+#[derive(Debug, Clone)]
+pub struct NativeToolCall {
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+/// Build Ollama-compatible tool schemas from tool name/description/parameters_hint.
+/// This converts our simple tool hints into the function-calling JSON format.
+pub fn build_native_tool_schemas(tools: &[(String, String, String)]) -> Vec<serde_json::Value> {
+    tools
+        .iter()
+        .map(|(name, description, params_hint)| {
+            // Try to parse parameters_hint as JSON, otherwise build a simple schema
+            let parameters = parse_tool_parameters(name, params_hint);
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": parameters,
+                }
+            })
+        })
+        .collect()
+}
+
+/// Parse a tool's parameters_hint into a proper JSON Schema
+fn parse_tool_parameters(name: &str, hint: &str) -> serde_json::Value {
+    // Try to parse the hint as JSON to extract parameter names and types
+    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(hint) {
+        if let Some(map) = obj.as_object() {
+            let mut properties = serde_json::Map::new();
+            let mut required = Vec::new();
+
+            for (key, val) in map {
+                let type_str = match val {
+                    serde_json::Value::String(_) => "string",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::Bool(_) => "boolean",
+                    _ => "string",
+                };
+                properties.insert(
+                    key.clone(),
+                    serde_json::json!({
+                        "type": type_str,
+                        "description": format!("{}", val),
+                    }),
+                );
+                // First param is usually required
+                if required.is_empty() {
+                    required.push(key.clone());
+                }
+            }
+
+            return serde_json::json!({
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            });
+        }
+    }
+
+    // Fallback: known tool schemas
+    match name {
+        "bash" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": { "type": "string", "description": "The shell command to run" }
+            },
+            "required": ["command"]
+        }),
+        "read" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Path to the file to read" },
+                "offset": { "type": "number", "description": "Line number to start from (1-based)" },
+                "limit": { "type": "number", "description": "Number of lines to read" }
+            },
+            "required": ["path"]
+        }),
+        "glob" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Glob pattern (e.g. **/*.rs)" },
+                "path": { "type": "string", "description": "Directory to search in" }
+            },
+            "required": ["pattern"]
+        }),
+        "grep" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Regex pattern to search" },
+                "path": { "type": "string", "description": "Directory or file to search" },
+                "type": { "type": "string", "description": "File type filter (e.g. rs, js, py)" },
+                "output_mode": { "type": "string", "description": "content, files_with_matches, or count" }
+            },
+            "required": ["pattern"]
+        }),
+        "edit" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "File to edit" },
+                "old_text": { "type": "string", "description": "Text to find" },
+                "new_text": { "type": "string", "description": "Replacement text" },
+                "replace_all": { "type": "boolean", "description": "Replace all occurrences" }
+            },
+            "required": ["path", "old_text", "new_text"]
+        }),
+        "write" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "File path to write" },
+                "content": { "type": "string", "description": "File content" }
+            },
+            "required": ["path", "content"]
+        }),
+        _ => serde_json::json!({
+            "type": "object",
+            "properties": {},
+        }),
     }
 }
 
