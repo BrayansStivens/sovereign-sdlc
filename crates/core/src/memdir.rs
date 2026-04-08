@@ -355,6 +355,11 @@ fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<(String, usi
     while start < len {
         let mut end = (start + chunk_size).min(len);
 
+        // Ensure valid UTF-8 boundary FIRST — before any slicing
+        while end < len && !text.is_char_boundary(end) {
+            end += 1;
+        }
+
         // Try to break at a newline for cleaner chunks
         if end < len {
             if let Some(pos) = text[start..end].rfind('\n') {
@@ -362,11 +367,6 @@ fn chunk_text(text: &str, chunk_size: usize, overlap: usize) -> Vec<(String, usi
                     end = start + pos + 1;
                 }
             }
-        }
-
-        // Ensure valid UTF-8 boundary
-        while end < len && !text.is_char_boundary(end) {
-            end += 1;
         }
 
         chunks.push((text[start..end].to_string(), start, end));
