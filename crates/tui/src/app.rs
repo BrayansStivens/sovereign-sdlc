@@ -416,50 +416,63 @@ fn render_hw(frame: &mut Frame, cpu: u16, ram: u16, tier: &PerformanceTier, mode
 }
 
 fn render_activity(frame: &mut Frame, loading: &LoadingAnimation, coord: &Coordinator, area: Rect) {
-    use crate::splash;
+    use crate::splash::{self, HoustonMood};
 
     let mut lines: Vec<Line> = Vec::new();
 
-    if loading.is_active() {
-        // Show animated robot during generation
-        let robot = splash::robot_frame(loading.tick);
-        for rl in robot {
-            lines.push(Line::from(Span::styled(
-                format!("    {rl}"),
-                Style::default().fg(CYAN_ACCENT).bold(),
-            )));
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            format!("    {}", splash::progress_dots(loading.tick)),
-            Style::default().fg(INDIGO),
-        )));
-    } else {
-        // Show project stats when idle
-        let rag_status = if coord.rag_enabled {
-            format!("{} chunks", coord.memory.chunk_count())
-        } else {
-            "not indexed".into()
-        };
-        let grimoire_n = coord.grimoire.as_ref()
-            .and_then(|g| g.count().ok()).unwrap_or(0);
+    // Determine Houston's mood from loading state
+    let mood = match &loading.state {
+        LoadingState::Idle => HoustonMood::Idle,
+        LoadingState::Routing => HoustonMood::Routing,
+        LoadingState::Thinking => HoustonMood::Thinking,
+        LoadingState::Generating { .. } => HoustonMood::Generating,
+        LoadingState::Indexing { .. } => HoustonMood::Indexing,
+        LoadingState::Scanning => HoustonMood::Thinking,
+    };
 
-        lines.push(Line::from(Span::styled(" Project", Style::default().fg(INDIGO).bold())));
+    // Houston face
+    let houston = splash::houston_lines(&mood, loading.tick);
+    let face_color = match &mood {
+        HoustonMood::Idle => TEXT_DIM,
+        HoustonMood::Routing => INDIGO,
+        HoustonMood::Thinking => INDIGO,
+        HoustonMood::Generating => CYAN_ACCENT,
+        HoustonMood::Error => RED_ALERT,
+        HoustonMood::Done => GREEN_OK,
+        HoustonMood::Indexing => YELLOW_WARN,
+    };
+
+    for hl in &houston {
+        lines.push(Line::from(Span::styled(hl.clone(), Style::default().fg(face_color))));
+    }
+
+    lines.push(Line::from(""));
+
+    // Project stats below Houston
+    let rag_status = if coord.rag_enabled {
+        format!("{} chunks", coord.memory.chunk_count())
+    } else {
+        "run /index".into()
+    };
+    let grimoire_n = coord.grimoire.as_ref()
+        .and_then(|g| g.count().ok()).unwrap_or(0);
+
+    lines.push(Line::from(Span::styled(
+        format!("   RAG  {rag_status}"), Style::default().fg(TEXT_DIM),
+    )));
+    if grimoire_n > 0 {
         lines.push(Line::from(Span::styled(
-            format!(" RAG  {rag_status}"), Style::default().fg(TEXT_DIM),
-        )));
-        lines.push(Line::from(Span::styled(
-            format!(" Fixes  {grimoire_n} patterns"), Style::default().fg(TEXT_DIM),
+            format!("   Fix  {grimoire_n} patterns"), Style::default().fg(TEXT_DIM),
         )));
     }
 
-    let title = if loading.is_active() { " Working " } else { " Status " };
-    let color = if loading.is_active() { CYAN_ACCENT } else { SURFACE_LIGHT };
+    let title = if loading.is_active() { " Houston " } else { " Houston " };
+    let border = if loading.is_active() { face_color } else { SURFACE_LIGHT };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(color))
-        .title(Span::styled(title, Style::default().fg(color)));
+        .border_style(Style::default().fg(border))
+        .title(Span::styled(title, Style::default().fg(face_color)));
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 

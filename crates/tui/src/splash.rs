@@ -1,95 +1,112 @@
-//! Splash Screen + Generation Animation
+//! Splash Screen + Houston Bot Animation
 //!
-//! ASCII art startup + animated robot during generation.
+//! Block-letter ASCII banner + expressive robot companion.
 
-/// Startup ASCII art — shown once at launch
+/// Block-letter startup banner
 pub const SPLASH: &[&str] = &[
     "",
-    r"    ___  _____  _   _ _____ _____ _____ _____ _____ _   _ ",
-    r"   / __||  _  || | | |  ___|  _  |  ___|_   _|  ___| \ | |",
-    r"   \__ \| | | || | | | |__ | |_| | |__   | | | | __|  \| |",
-    r"   |___/|_| |_| \_/ |____|_| |_|____|  |_| |_____|_|\__|",
-    r"                   S  D  L  C    v0.4",
+    " ███████╗ ██████╗ ██╗   ██╗███████╗██████╗ ███████╗██╗ ██████╗ ███╗   ██╗",
+    " ██╔════╝██╔═══██╗██║   ██║██╔════╝██╔══██╗██╔════╝██║██╔════╝ ████╗  ██║",
+    " ███████╗██║   ██║██║   ██║█████╗  ██████╔╝█████╗  ██║██║  ███╗██╔██╗ ██║",
+    " ╚════██║██║   ██║╚██╗ ██╔╝██╔══╝  ██╔══██╗██╔══╝  ██║██║   ██║██║╚██╗██║",
+    " ███████║╚██████╔╝ ╚████╔╝ ███████╗██║  ██║███████╗██║╚██████╔╝██║ ╚████║",
+    " ╚══════╝ ╚═════╝   ╚═══╝  ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝",
+    "                        S  D  L  C    v 0 . 4",
     "",
 ];
 
-/// Robot animation frames for generation (8 frames)
-pub const ROBOT_WORKING: &[&[&str]] = &[
-    // Frame 0: idle
-    &[
-        "  [::] ",
-        " /|==|\\",
-        "  /  \\ ",
-        "  ----  ",
-    ],
-    // Frame 1: right arm up
-    &[
-        "  [::] ",
-        " /|==|/",
-        "  /  \\ ",
-        "  ----  ",
-    ],
-    // Frame 2: both arms up
-    &[
-        "  [::] ",
-        " \\|==|/",
-        "  /  \\ ",
-        "  ----  ",
-    ],
-    // Frame 3: typing
-    &[
-        "  [..] ",
-        " /|==|\\",
-        "  |  | ",
-        "  ====  ",
-    ],
-    // Frame 4: thinking
-    &[
-        "  [??] ",
-        " /|==|\\",
-        "  /  \\ ",
-        "  o  o  ",
-    ],
-    // Frame 5: working
-    &[
-        "  [><] ",
-        " \\|==|\\",
-        "  /  \\ ",
-        "  ----  ",
-    ],
-    // Frame 6: sparks
-    &[
-        " *[::]*",
-        " /|==|\\",
-        "  /  \\ ",
-        "  ----  ",
-    ],
-    // Frame 7: done flash
-    &[
-        "  [OK] ",
-        " \\|==|/",
-        "  /  \\ ",
-        "  ====  ",
-    ],
+// ────────────────────────────────────────────────────────
+// Houston — Expressive bot for generation feedback
+// ────────────────────────────────────────────────────────
+
+/// Houston frame: face line + message
+pub struct HoustonFrame {
+    pub face: &'static str,
+    pub message: &'static str,
+}
+
+/// All Houston expressions
+const HOUSTON_ROUTING: HoustonFrame = HoustonFrame {
+    face: " ● ◡ ● ",
+    message: "Routing...",
+};
+
+const HOUSTON_THINKING: &[HoustonFrame] = &[
+    HoustonFrame { face: " ◠ ◡ ◠ ", message: "Thinking..." },
+    HoustonFrame { face: " ✦ ◡ ✦ ", message: "Processing..." },
+    HoustonFrame { face: " - ᴥ - ", message: "Working..." },
+    HoustonFrame { face: " ◠ ◡ ◠ ", message: "Analyzing..." },
 ];
 
-/// Get the current robot frame based on tick
-pub fn robot_frame(tick: u64) -> &'static [&'static str] {
-    let idx = (tick as usize / 2) % (ROBOT_WORKING.len() - 1); // Skip "done" frame
-    ROBOT_WORKING[idx]
+const HOUSTON_GENERATING: &[HoustonFrame] = &[
+    HoustonFrame { face: " ● ◡ ● ", message: "Generating..." },
+    HoustonFrame { face: " ✦ ◡ ✦ ", message: "Writing code..." },
+    HoustonFrame { face: " ◠ ◡ ◠ ", message: "Almost there..." },
+    HoustonFrame { face: " ^ ᴥ ^ ", message: "Coming along!" },
+    HoustonFrame { face: " ● ◡ ● ", message: "Keep going..." },
+    HoustonFrame { face: " ✦ ◡ ✦ ", message: "Crafting..." },
+];
+
+const HOUSTON_ERROR: HoustonFrame = HoustonFrame {
+    face: " ; ᴥ ; ",
+    message: "Ups, an error...",
+};
+
+const HOUSTON_DONE: HoustonFrame = HoustonFrame {
+    face: " ^ ᴥ ^ ",
+    message: "Done!",
+};
+
+const HOUSTON_IDLE: &[HoustonFrame] = &[
+    HoustonFrame { face: " ● ◡ ● ", message: "Ready" },
+    HoustonFrame { face: " - ᴥ - ", message: "..." },
+    HoustonFrame { face: " ● ◡ ● ", message: "Waiting" },
+];
+
+const HOUSTON_INDEXING: HoustonFrame = HoustonFrame {
+    face: " ✦ ◡ ✦ ",
+    message: "Indexing project...",
+};
+
+/// Houston display state
+pub enum HoustonMood {
+    Idle,
+    Routing,
+    Thinking,
+    Generating,
+    Error,
+    Done,
+    Indexing,
 }
 
-/// Get the "done" frame
-pub fn robot_done() -> &'static [&'static str] {
-    ROBOT_WORKING[ROBOT_WORKING.len() - 1]
-}
-
-/// Progress dots animation (longer cycle)
-pub fn progress_dots(tick: u64) -> &'static str {
-    match (tick / 3) % 4 {
-        0 => "    ",
-        1 => ".   ",
-        2 => "..  ",
-        _ => "... ",
+/// Get the Houston frame for the current mood and tick
+pub fn houston_frame(mood: &HoustonMood, tick: u64) -> (&'static str, &'static str) {
+    match mood {
+        HoustonMood::Idle => {
+            let f = &HOUSTON_IDLE[(tick as usize / 8) % HOUSTON_IDLE.len()];
+            (f.face, f.message)
+        }
+        HoustonMood::Routing => (HOUSTON_ROUTING.face, HOUSTON_ROUTING.message),
+        HoustonMood::Thinking => {
+            let f = &HOUSTON_THINKING[(tick as usize / 4) % HOUSTON_THINKING.len()];
+            (f.face, f.message)
+        }
+        HoustonMood::Generating => {
+            let f = &HOUSTON_GENERATING[(tick as usize / 5) % HOUSTON_GENERATING.len()];
+            (f.face, f.message)
+        }
+        HoustonMood::Error => (HOUSTON_ERROR.face, HOUSTON_ERROR.message),
+        HoustonMood::Done => (HOUSTON_DONE.face, HOUSTON_DONE.message),
+        HoustonMood::Indexing => (HOUSTON_INDEXING.face, HOUSTON_INDEXING.message),
     }
+}
+
+/// Render Houston as 3 lines of text for the TUI
+pub fn houston_lines(mood: &HoustonMood, tick: u64) -> [String; 3] {
+    let (face, message) = houston_frame(mood, tick);
+    [
+        format!("   ╭─────╮"),
+        format!("   │{}│  {}", face, message),
+        format!("   ╰─────╯"),
+    ]
 }
