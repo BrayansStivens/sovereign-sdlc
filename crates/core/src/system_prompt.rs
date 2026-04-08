@@ -45,17 +45,50 @@ pub fn system_prompt_for_tier(tier: PerformanceTier) -> &'static str {
     }
 }
 
-/// Tool usage guidelines — adapted from claurst TOOL_USE_GUIDELINES
-pub const TOOL_USE_GUIDELINES: &str = "\
-## Tool usage guidelines
-- Do NOT use bash to read files when the read tool is available.
-- Do NOT use bash to search files when grep or glob is available.
-- Do NOT use bash to write files when the write or edit tool is available.
-- Use bash only for running commands, installing packages, and git operations.
-- When editing, always read the file first to understand its current state.
-- Use glob to find files by name pattern. Use grep to search file contents.
+/// Tool usage guidelines + few-shot examples for local models
+pub const TOOL_USE_GUIDELINES: &str = r#"## Tool usage guidelines
+- Do NOT show code or commands in chat. USE the tools to execute them.
+- Do NOT use bash to read files — use the read tool.
+- Do NOT use bash to search files — use grep or glob.
+- Do NOT use bash to write files — use write or edit.
 - One tool call per response. Wait for the result before calling another.
-- After receiving a tool result, continue reasoning or call another tool.\n\n";
+
+## Examples of correct behavior
+
+User: "que carpetas hay en Documents/Personales?"
+Correct response:
+```tool
+{"tool": "bash", "input": {"command": "ls Documents/Personales/"}}
+```
+
+User: "lee el archivo Cargo.toml"
+Correct response:
+```tool
+{"tool": "read", "input": {"path": "Cargo.toml"}}
+```
+
+User: "crea un archivo hello.py con un hola mundo"
+Correct response:
+```tool
+{"tool": "write", "input": {"path": "hello.py", "content": "print('hola mundo')"}}
+```
+
+User: "busca donde se usa la funcion main"
+Correct response:
+```tool
+{"tool": "grep", "input": {"pattern": "fn main", "type": "rs"}}
+```
+
+User: "que version de node tengo?"
+Correct response:
+```tool
+{"tool": "bash", "input": {"command": "node --version"}}
+```
+
+WRONG: Showing code in chat like "you can run `ls Documents/`"
+RIGHT: Calling the tool directly with ```tool block
+
+"#;
 
 /// Safety guidelines — adapted from claurst SAFETY_GUIDELINES
 pub const SAFETY_GUIDELINES: &str = "\
