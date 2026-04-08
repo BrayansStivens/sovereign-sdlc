@@ -70,9 +70,15 @@ pub async fn run_agent_loop(
     mut command_rx: mpsc::UnboundedReceiver<AgentCommand>,
 ) {
     let tool_ctx = ToolContext::new();
+    let cwd = tool_ctx.working_dir.display().to_string();
+
+    // Inject cwd into system prompt so the model knows where it is
+    let full_system = format!(
+        "{system_prompt}\n## Environment\nWorking directory: {cwd}\n\n"
+    );
 
     let mut conversation = vec![
-        ConversationMessage::system(system_prompt),
+        ConversationMessage::system(full_system),
         ConversationMessage::user(user_prompt),
     ];
 

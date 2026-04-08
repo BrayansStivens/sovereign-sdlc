@@ -210,8 +210,9 @@ pub async fn run_tui() -> Result<()> {
                         }
                         AgentEvent::Done(metrics) => {
                             if let Some(buf) = streaming_buffer.take() {
-                                if !buf.trim().is_empty() {
-                                    messages.push(ChatMsg::assistant(buf));
+                                let clean = strip_tool_block(&buf);
+                                if !clean.trim().is_empty() {
+                                    messages.push(ChatMsg::assistant(clean));
                                 }
                             }
                             streaming_tokens = 0;
