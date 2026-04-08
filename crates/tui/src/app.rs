@@ -819,41 +819,8 @@ fn needs_agent(prompt: &str) -> bool {
     signals.iter().any(|s| lower.contains(s))
 }
 
-/// Ask the LLM to classify if the prompt needs a system command.
-/// Returns the command to run, or None if no command needed.
-/// Uses a tiny fast prompt that even 7B models handle well.
-async fn classify_intent(client: &sovereign_api::OllamaClient, model: &str, prompt: &str) -> Option<String> {
-    let classifier_prompt = format!(
-        "Does this user message require running a terminal command to answer? \
-         If YES, reply with ONLY the exact command (nothing else). \
-         If NO, reply with ONLY the word NONE.\n\n\
-         Examples:\n\
-         User: en que carpeta estamos?\nCommand: pwd\n\
-         User: que archivos hay?\nCommand: ls -la\n\
-         User: muestra el git status\nCommand: git status\n\
-         User: explica que es rust\nCommand: NONE\n\
-         User: hola como estas\nCommand: NONE\n\
-         User: lee el archivo main.rs\nCommand: cat main.rs\n\
-         User: cuanto pesa este proyecto\nCommand: du -sh .\n\
-         User: que version de node tengo\nCommand: node --version\n\n\
-         User: {prompt}\nCommand:"
-    );
-
-    let response = client.generate(model, &classifier_prompt).await.ok()?;
-    let cmd = response.trim().to_string();
-
-    // Filter out non-commands
-    if cmd.is_empty() || cmd == "NONE" || cmd.to_uppercase() == "NONE"
-        || cmd.len() > 200 || cmd.contains('\n') || cmd.starts_with("I ")
-        || cmd.starts_with("The ") || cmd.starts_with("No ") || cmd.starts_with("This ")
-    {
-        return None;
-    }
-
-    Some(cmd)
-}
-
-/// Run the tool-aware agent loop (claurst-style)
+/// The agent loop: single LLM call that MUST return a command or a direct answer.
+/// No separate classifier — the prompt forces the model to act.
 async fn run_agent_loop(
     tx: mpsc::Sender<GenResult>,
     mut approval_rx: mpsc::Receiver<ApprovalResponse>,
@@ -861,144 +828,114 @@ async fn run_agent_loop(
     prompt: String,
     system_context: String,
 ) {
-    use sovereign_tools::{default_registry, parse_tool_call, ToolContext};
-
     let client = sovereign_api::OllamaClient::new();
-    let registry = default_registry();
-    let ctx = ToolContext::new();
+    let cwd = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .to_string_lossy().to_string();
 
-    // ── Smart pre-executor: ask LLM to classify if a command is needed ──
-    let _ = tx.send(GenResult::AgentThink("Classifying intent...".into())).await;
+    // ── Step 1: Force the LLM to give us a command ──
+    let _ = tx.send(GenResult::AgentThink("Deciding action...".into())).await;
 
-    let pre_context = match classify_intent(&client, &model, &prompt).await {
-        Some(cmd) => {
-            let _ = tx.send(GenResult::AgentNeedApproval {
-                command: cmd.clone(),
-                reason: "Agent wants to run this".into(),
-            }).await;
+    let command_prompt = format!(
+        "You are a terminal assistant. You have FULL access to run commands on this computer.\n\
+         Current directory: {cwd}\n\n\
+         The user asked: \"{prompt}\"\n\n\
+         Reply with ONLY the terminal command needed to answer this. Nothing else.\n\
+         If no command is needed, reply with just the answer.\n\n\
+         Examples:\n\
+         Q: en que carpeta estamos?\n\
+         A: pwd\n\n\
+         Q: tenemos git instalado?\n\
+         A: which git\n\n\
+         Q: que archivos hay aqui?\n\
+         A: ls -la\n\n\
+         Q: lee el archivo Cargo.toml\n\
+         A: cat Cargo.toml\n\n\
+         Q: que version de rust tenemos?\n\
+         A: rustc --version\n\n\
+         Q: hola como estas?\n\
+         A: Hola! Estoy listo para ayudarte. Que necesitas?\n\n\
+         Q: {prompt}\n\
+         A:"
+    );
 
-            match approval_rx.recv().await {
-                Some(ApprovalResponse::Approved) => {
-                    let result = sovereign_core::diff::execute_command(&cmd,
-                        &ctx.working_dir.to_string_lossy());
-                    match result {
-                        Ok(r) => {
-                            let _ = tx.send(GenResult::AgentThink(
-                                format!("[+] {} bytes", r.stdout.len())
-                            )).await;
-                            format!("\n\n[System ran `{cmd}`. Output:]\n{}\n\n\
-                                     Use this output to answer the user naturally.",
-                                    r.stdout)
-                        }
-                        Err(e) => format!("\n\n[`{cmd}` failed: {e}]\n")
-                    }
-                }
-                _ => {
-                    let _ = tx.send(GenResult::AgentThink("[denied]".into())).await;
-                    "\n\n[User denied the command. Answer with what you know.]\n".into()
-                }
-            }
-        }
-        None => {
-            let _ = tx.send(GenResult::AgentThink("No command needed".into())).await;
-            String::new()
+    let step1 = match client.generate(&model, &command_prompt).await {
+        Ok(r) => r.trim().to_string(),
+        Err(e) => {
+            let _ = tx.send(GenResult::Error(format!("{e}"))).await;
+            return;
         }
     };
 
-    // Build system prompt with tool descriptions + pre-context
-    let tools_prompt = registry.system_prompt();
-    let full_system = format!(
-        "{system_context}\n{tools_prompt}{pre_context}\n\
-         User: {prompt}"
-    );
+    // Check if it looks like a command (short, no sentences, starts with common commands)
+    let is_command = step1.len() < 150
+        && !step1.contains(". ")
+        && !step1.starts_with("Hola")
+        && !step1.starts_with("I ")
+        && !step1.starts_with("El ")
+        && !step1.starts_with("La ")
+        && !step1.starts_with("No ")
+        && !step1.starts_with("Sure")
+        && !step1.starts_with("Here")
+        && step1.lines().count() <= 2;
 
-    let mut messages = full_system;
-    let max_turns = 8;
-
-    for turn in 0..max_turns {
-        let _ = tx.send(GenResult::AgentThink(format!("Turn {}/{max_turns}", turn + 1))).await;
-
-        // Ask LLM
-        let response = match client.generate(&model, &messages).await {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = tx.send(GenResult::Error(format!("{e}"))).await;
-                return;
-            }
-        };
-
-        // Try to parse a tool call from the response
-        match parse_tool_call(&response) {
-            Some((call, thinking)) => {
-                // Show thinking text if any
-                if !thinking.is_empty() {
-                    let short = if thinking.len() > 150 { format!("{}...", &thinking[..150]) } else { thinking };
-                    let _ = tx.send(GenResult::AgentThink(short)).await;
-                }
-
-                let tool = registry.get(&call.name);
-                let perm_level = tool.map(|t| t.permission_level())
-                    .unwrap_or(sovereign_tools::PermissionLevel::Execute);
-
-                // Auto-allow read-only tools, ask for everything else
-                let approved = if perm_level == sovereign_tools::PermissionLevel::ReadOnly {
-                    let _ = tx.send(GenResult::AgentReadFile(
-                        call.input.get("path").and_then(|v| v.as_str())
-                            .or_else(|| call.input.get("pattern").and_then(|v| v.as_str()))
-                            .unwrap_or(&call.name).to_string()
-                    )).await;
-                    true
-                } else {
-                    // Need user approval
-                    let desc = format!("{}: {}",
-                        call.name,
-                        call.input.get("command").and_then(|v| v.as_str())
-                            .or_else(|| call.input.get("path").and_then(|v| v.as_str()))
-                            .unwrap_or("(see details)")
-                    );
-                    let _ = tx.send(GenResult::AgentNeedApproval {
-                        command: desc,
-                        reason: format!("Tool: {}", call.name),
-                    }).await;
-
-                    matches!(approval_rx.recv().await, Some(ApprovalResponse::Approved))
-                };
-
-                if approved {
-                    let result = registry.execute(&call, &ctx)
-                        .unwrap_or_else(|e| sovereign_tools::ToolResult::error(format!("{e}")));
-
-                    let status = if result.is_error { "Error" } else { "Result" };
-                    let _ = tx.send(GenResult::AgentThink(
-                        format!("[{status}] {} chars", result.output.len())
-                    )).await;
-
-                    // Feed result back to LLM
-                    messages.push_str(&format!(
-                        "\nAssistant: {response}\n\
-                         Tool Result ({}):\n{}\n\n\
-                         Based on this result, respond to the user. \
-                         If you need another tool, use the ```tool format. \
-                         Otherwise, just respond normally.",
-                        call.name, result.output,
-                    ));
-                } else {
-                    messages.push_str(&format!(
-                        "\nAssistant: {response}\n\
-                         Tool Result: Permission denied by user.\n\n\
-                         The user denied this action. Respond with what you know."
-                    ));
-                }
-            }
-            None => {
-                // No tool call — this is the final response
-                let _ = tx.send(GenResult::AgentDone(response)).await;
-                return;
-            }
-        }
+    if !is_command {
+        // LLM gave a direct answer — no command needed
+        let _ = tx.send(GenResult::AgentDone(step1)).await;
+        return;
     }
 
-    let _ = tx.send(GenResult::AgentDone("Max turns reached.".into())).await;
+    // ── Step 2: Ask user for approval to run the command ──
+    let cmd = step1.lines().next().unwrap_or(&step1).trim().to_string();
+    let _ = tx.send(GenResult::AgentNeedApproval {
+        command: cmd.clone(),
+        reason: "To answer your question".into(),
+    }).await;
+
+    let cmd_output = match approval_rx.recv().await {
+        Some(ApprovalResponse::Approved) => {
+            match sovereign_core::diff::execute_command(&cmd, &cwd) {
+                Ok(r) => {
+                    let _ = tx.send(GenResult::AgentThink(format!("[+] {}", r.summary()))).await;
+                    if r.success { r.stdout } else { format!("Error: {}", r.stderr) }
+                }
+                Err(e) => {
+                    let _ = tx.send(GenResult::AgentThink(format!("[-] {e}"))).await;
+                    format!("Failed: {e}")
+                }
+            }
+        }
+        _ => {
+            let _ = tx.send(GenResult::AgentDone(
+                "Command denied. I can't answer without running it.".into()
+            )).await;
+            return;
+        }
+    };
+
+    // ── Step 3: Let LLM interpret the result naturally ──
+    let _ = tx.send(GenResult::AgentThink("Interpreting result...".into())).await;
+
+    let interpret_prompt = format!(
+        "{system_context}\n\
+         The user asked: \"{prompt}\"\n\n\
+         I ran `{cmd}` and got this output:\n\
+         ```\n{cmd_output}\n```\n\n\
+         Answer the user's question based on this output. Be concise and natural."
+    );
+
+    match client.generate_with_metrics(&model, &interpret_prompt).await {
+        Ok(metrics) => {
+            let _ = tx.send(GenResult::AgentThink(metrics.summary())).await;
+            let _ = tx.send(GenResult::AgentDone(metrics.response)).await;
+        }
+        Err(e) => {
+            // Fallback: just show the raw output
+            let _ = tx.send(GenResult::AgentDone(format!(
+                "$ {cmd}\n{cmd_output}"
+            ))).await;
+        }
+    }
 }
 
 /// Detect if LLM response contains a proposed action (edit or command)
