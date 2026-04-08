@@ -158,8 +158,10 @@ pub async fn run_tui() -> Result<()> {
                         }
                         AgentEvent::ToolStart { name, input_summary } => {
                             if let Some(buf) = streaming_buffer.take() {
-                                if !buf.trim().is_empty() {
-                                    messages.push(ChatMsg::assistant(buf));
+                                // Strip the ```tool JSON block from display
+                                let clean = strip_tool_block(&buf);
+                                if !clean.trim().is_empty() {
+                                    messages.push(ChatMsg::assistant(clean));
                                 }
                             }
                             streaming_tokens = 0;
@@ -537,11 +539,12 @@ fn render_chat(frame: &mut Frame, messages: &[ChatMsg], streaming: Option<&str>,
         lines.push(Line::from(""));
     }
 
-    // Show streaming buffer as partial assistant message
+    // Show streaming buffer as partial assistant message (strip tool JSON)
     if let Some(buf) = streaming {
-        if !buf.is_empty() {
+        let clean = strip_tool_block(buf);
+        if !clean.trim().is_empty() {
             lines.push(Line::from(Span::styled("  sov ", Style::default().fg(GREEN_OK).bold())));
-            for l in buf.lines() {
+            for l in clean.lines() {
                 lines.push(Line::from(Span::styled(
                     format!("  \u{2502} {l}"),
                     Style::default().fg(TEXT),
@@ -741,4 +744,23 @@ Approval: (y)es (n)o (e)xplain (Esc)cancel";
 
 // run_agent_loop() removed — replaced by agent_loop.rs in sovereign-query
 
-// detect_proposed_action() and apply_diff_lines() removed — replaced by agent tool system
+/// Strip ```tool and ```json blocks from text before displaying to user.
+/// The tool call JSON is shown as [tool] indicators instead.
+fn strip_tool_block(text: &str) -> String {
+    let mut result = text.to_string();
+    // Remove ```tool ... ``` blocks
+    for marker in &["```tool", "```json"] {
+        while let Some(start) = result.find(marker) {
+            let after = start + marker.len();
+            if let Some(end) = result[after..].find("```") {
+                // Remove from marker start to closing ```
+                result.replace_range(start..after + end + 3, "");
+            } else {
+                // No closing ``` — remove from marker to end
+                result.truncate(start);
+                break;
+            }
+        }
+    }
+    result
+}
