@@ -26,7 +26,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 
 # Ollama
-ollama-rs = { version = "0.2", features = ["stream"] }
+ollama-rs = { version = "0.2", default-features = false, features = ["stream", "rustls"] }
 
 # Hardware & System
 sysinfo = "0.33"
