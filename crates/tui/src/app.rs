@@ -52,10 +52,35 @@ enum ApprovalResponse {
     Denied,
 }
 
+/// Restore terminal to normal state (called on exit and panic)
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+        crossterm::event::DisableBracketedPaste,
+        crossterm::cursor::Show,
+    );
+}
+
 /// Run the TUI with async generation
 pub async fn run_tui() -> Result<()> {
+    // Install panic hook — ensures terminal is restored even on crash
+    let original_hook = std::panic::take_hook();
+    let main_thread = std::thread::current().id();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().id() == main_thread {
+            restore_terminal();
+        }
+        original_hook(info);
+    }));
+
     enable_raw_mode()?;
-    stdout().execute(EnterAlternateScreen)?;
+    crossterm::execute!(
+        stdout(),
+        EnterAlternateScreen,
+        crossterm::event::EnableBracketedPaste,
+    )?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
     let mut coordinator = Coordinator::new();
@@ -89,7 +114,8 @@ pub async fn run_tui() -> Result<()> {
     let mut scroll: u16 = 0;
     let mut running = true;
     let mut paste_range: Option<(usize, usize)> = None;
-    let mut last_key_time = Instant::now();
+    let mut paste_counter: u32 = 0;
+    let mut paste_contents: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     let mut approval_state = ApprovalState::None;
     let mut last_hw = Instant::now();
     let mut loading = LoadingAnimation::new();
@@ -254,7 +280,39 @@ pub async fn run_tui() -> Result<()> {
 
         // Events
         if event::poll(Duration::from_millis(refresh_ms.min(80)))? {
-            if let Event::Key(key) = event::read()? {
+            let ev = event::read()?;
+
+            // ── Handle Paste events (native crossterm bracketed paste) ──
+            if let Event::Paste(data) = &ev {
+                if !loading.is_active() && !approval_state.is_pending() {
+                    let line_count = data.lines().count();
+                    if data.len() > 80 || line_count > 1 {
+                        // Store full content, show placeholder
+                        paste_counter += 1;
+                        let placeholder = if line_count > 1 {
+                            format!("[Pasted text #{} +{} lines]", paste_counter, line_count)
+                        } else {
+                            format!("[Pasted text #{}]", paste_counter)
+                        };
+                        paste_contents.insert(paste_counter, data.clone());
+                        let start = cursor_pos;
+                        for c in placeholder.chars() {
+                            input.insert(cursor_pos, c);
+                            cursor_pos += 1;
+                        }
+                        paste_range = Some((start, cursor_pos));
+                    } else {
+                        // Short paste — insert directly
+                        for c in data.chars() {
+                            input.insert(cursor_pos, c);
+                            cursor_pos += 1;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if let Event::Key(key) = ev {
                 if key.kind != KeyEventKind::Press { continue; }
 
                 // ── Approval overlay key handling ──
@@ -335,7 +393,22 @@ pub async fn run_tui() -> Result<()> {
 
                 match key.code {
                     KeyCode::Enter if !input.is_empty() && !loading.is_active() => {
-                        let user_input = input.clone();
+                        // Expand paste placeholders with real content
+                        let mut user_input = input.clone();
+                        for (id, content) in &paste_contents {
+                            let placeholder_multi = format!("[Pasted text #{id} +");
+                            let placeholder_single = format!("[Pasted text #{id}]");
+                            if let Some(pos) = user_input.find(&placeholder_multi) {
+                                // Find the closing ]
+                                if let Some(end) = user_input[pos..].find(']') {
+                                    user_input.replace_range(pos..pos+end+1, content);
+                                }
+                            } else if let Some(pos) = user_input.find(&placeholder_single) {
+                                user_input.replace_range(pos..pos+placeholder_single.len(), content);
+                            }
+                        }
+                        paste_contents.clear();
+                        paste_range = None;
                         input.clear();
                         cursor_pos = 0;
                         scroll = 0;
@@ -453,46 +526,24 @@ pub async fn run_tui() -> Result<()> {
                         buddy.save(); running = false;
                     }
                     KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) && c == 'z' => {
-                        // Suspend to background (like Claude Code)
+                        // Suspend to background
                         buddy.save();
-                        disable_raw_mode()?;
-                        stdout().execute(LeaveAlternateScreen)?;
+                        restore_terminal();
                         #[cfg(unix)]
                         {
-                            // Send SIGTSTP to self
                             unsafe { libc::raise(libc::SIGTSTP); }
                         }
-                        // When fg resumes, restore terminal
+                        // Resume
                         enable_raw_mode()?;
-                        stdout().execute(EnterAlternateScreen)?;
+                        crossterm::execute!(stdout(), EnterAlternateScreen, crossterm::event::EnableBracketedPaste)?;
                         terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
                     }
                     KeyCode::Char(c) if !loading.is_active() => {
-                        // Paste detection: if chars arrive < 5ms apart, it's a paste
-                        let now = Instant::now();
-                        let is_paste = now.duration_since(last_key_time) < Duration::from_millis(5);
-                        last_key_time = now;
-
-                        if is_paste {
-                            // Extend paste range
-                            if let Some((start, _)) = paste_range {
-                                input.insert(cursor_pos, c);
-                                cursor_pos += 1;
-                                paste_range = Some((start, cursor_pos));
-                            } else {
-                                let start = cursor_pos.saturating_sub(1);
-                                input.insert(cursor_pos, c);
-                                cursor_pos += 1;
-                                paste_range = Some((start, cursor_pos));
-                            }
-                        } else {
-                            paste_range = None;
-                            input.insert(cursor_pos, c);
-                            cursor_pos += 1;
-                        }
+                        input.insert(cursor_pos, c);
+                        cursor_pos += 1;
                     }
                     KeyCode::Backspace if cursor_pos > 0 && !loading.is_active() => {
-                        // If we have a paste range and cursor is at end, delete entire paste
+                        // If cursor is at end of a paste placeholder, delete the whole block
                         if let Some((start, end)) = paste_range {
                             if cursor_pos == end && start < end {
                                 input.drain(start..end);
@@ -528,8 +579,7 @@ pub async fn run_tui() -> Result<()> {
         }
     }
 
-    disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
+    restore_terminal();
     Ok(())
 }
 
