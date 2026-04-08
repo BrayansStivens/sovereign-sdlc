@@ -121,9 +121,27 @@ impl ToolRegistry {
     /// Generate the system prompt section describing all available tools
     pub fn system_prompt(&self) -> String {
         let mut prompt = String::from(
-            "You have access to these tools. To use a tool, output a JSON block like this:\n\
+            "# TOOLS\n\n\
+             You have tools to interact with the filesystem and run commands.\n\
+             To use a tool, output EXACTLY this format:\n\n\
              ```tool\n\
-             {\"tool\": \"tool_name\", \"input\": {\"param\": \"value\"}}\n\
+             {\"tool\": \"TOOL_NAME\", \"input\": {\"param\": \"value\"}}\n\
+             ```\n\n\
+             EXAMPLE — read a file:\n\
+             ```tool\n\
+             {\"tool\": \"read\", \"input\": {\"path\": \"Cargo.toml\"}}\n\
+             ```\n\n\
+             EXAMPLE — list files:\n\
+             ```tool\n\
+             {\"tool\": \"glob\", \"input\": {\"pattern\": \"**/*.rs\"}}\n\
+             ```\n\n\
+             EXAMPLE — run a command:\n\
+             ```tool\n\
+             {\"tool\": \"bash\", \"input\": {\"command\": \"ls -la\"}}\n\
+             ```\n\n\
+             EXAMPLE — search code:\n\
+             ```tool\n\
+             {\"tool\": \"grep\", \"input\": {\"pattern\": \"fn main\", \"type\": \"rs\"}}\n\
              ```\n\n\
              Available tools:\n\n"
         );
@@ -136,11 +154,11 @@ impl ToolRegistry {
         }
 
         prompt.push_str(
-            "IMPORTANT RULES:\n\
-             - Use tools when you need to interact with the filesystem or run commands.\n\
+            "RULES:\n\
+             - Use ```tool blocks (NOT ```json) when calling tools.\n\
              - One tool call per response. Wait for the result before calling another.\n\
-             - If you don't need a tool, just respond normally (no ```tool block).\n\
-             - After receiving a tool result, give your final answer to the user.\n\n"
+             - After receiving a tool result, use it to answer the user.\n\
+             - If you don't need a tool, just respond normally with text.\n\n"
         );
 
         prompt
@@ -180,6 +198,12 @@ pub fn parse_tool_call(response: &str) -> Option<(ToolCall, String)> {
         return Some((call, String::new()));
     }
 
+    // Try single-key JSON blocks (local models often emit {"bash": {"command": "ls"}})
+    if let Some(call) = try_parse_single_key_json(response) {
+        let text_before = response.split("```").next().unwrap_or("").trim().to_string();
+        return Some((call, text_before));
+    }
+
     None
 }
 
@@ -209,6 +233,58 @@ fn try_parse_json_block(response: &str) -> Option<ToolCall> {
     let name = obj.get("tool")?.as_str()?.to_string();
     let input = obj.get("input").cloned().unwrap_or(Value::Object(Default::default()));
     Some(ToolCall { name, input })
+}
+
+/// Parse single-key JSON blocks that local models often produce.
+/// Handles: ```json\n{"glob": "**/*"}\n```  → tool=glob, input={"pattern": "**/*"}
+/// Handles: ```json\n{"bash": {"command": "ls"}}\n``` → tool=bash, input={"command": "ls"}
+fn try_parse_single_key_json(response: &str) -> Option<ToolCall> {
+    // Known tool names
+    const KNOWN_TOOLS: &[&str] = &["bash", "read", "glob", "grep", "edit", "write"];
+
+    // Look for any code block with JSON
+    for marker in &["```json", "```tool", "```"] {
+        if let Some(start) = response.find(marker) {
+            let content_start = start + marker.len();
+            if let Some(end) = response[content_start..].find("```") {
+                let json_str = response[content_start..content_start + end].trim();
+                if let Ok(obj) = serde_json::from_str::<Value>(json_str) {
+                    if let Some(map) = obj.as_object() {
+                        // Single key that matches a tool name
+                        if map.len() == 1 {
+                            if let Some((key, val)) = map.iter().next() {
+                                if KNOWN_TOOLS.contains(&key.as_str()) {
+                                    // Value is the input — wrap it properly
+                                    let input = match val {
+                                        Value::Object(_) => val.clone(),
+                                        Value::String(s) => {
+                                            // Guess the primary parameter
+                                            let param = match key.as_str() {
+                                                "bash" => "command",
+                                                "read" => "path",
+                                                "glob" => "pattern",
+                                                "grep" => "pattern",
+                                                "edit" => "path",
+                                                "write" => "path",
+                                                _ => "input",
+                                            };
+                                            serde_json::json!({ param: s })
+                                        }
+                                        _ => serde_json::json!({ "input": val }),
+                                    };
+                                    return Some(ToolCall {
+                                        name: key.clone(),
+                                        input,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 fn try_parse_inline_json(response: &str) -> Option<ToolCall> {

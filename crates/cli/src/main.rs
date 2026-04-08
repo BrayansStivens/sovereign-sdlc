@@ -194,41 +194,81 @@ async fn run_repl() -> Result<()> {
                 }
             }
             prompt => {
-                // Route and generate
-                match coord.route_prompt(prompt).await {
-                    Ok((cat, model)) => {
-                        let rag = if coord.rag_enabled { format!(" {GREEN}+RAG{RESET}") } else { String::new() };
-                        println!("  {DIM}[{cat}{rag}{DIM}] {GRAY}via {model}{RESET}");
-                        println!();
+                // Start agent session with streaming + tools
+                use sovereign_query::AgentEvent;
 
-                        match coord.generate(&model, prompt).await {
-                            Ok(resp) => {
-                                buddy.on_code_audited(resp.lines().count() as u64);
-                                // Format response with subtle left border
-                                for line in resp.lines() {
-                                    println!("  {GRAY}│{RESET} {line}");
-                                }
-                                println!("  {GRAY}│{RESET}");
+                let (mut event_rx, _cmd_tx) = coord.start_agent_session(prompt);
+                let mut streaming = false;
+
+                while let Some(event) = event_rx.recv().await {
+                    match event {
+                        AgentEvent::RouteInfo(info) => {
+                            println!("  {DIM}{info}{RESET}");
+                            println!();
+                        }
+                        AgentEvent::StreamDelta(text) => {
+                            if !streaming {
+                                print!("  {GRAY}│{RESET} ");
+                                streaming = true;
                             }
-                            Err(e) => {
-                                println!("  {RED}Error:{RESET} {e}");
-                                println!("  {DIM}Is Ollama running? Is '{model}' pulled?{RESET}");
-                                println!("  {DIM}Try: ollama pull {model}{RESET}");
+                            // Handle newlines in delta
+                            for (i, part) in text.split('\n').enumerate() {
+                                if i > 0 {
+                                    println!();
+                                    print!("  {GRAY}│{RESET} ");
+                                }
+                                print!("{part}");
+                            }
+                            io::stdout().flush().ok();
+                        }
+                        AgentEvent::ToolStart { name, input_summary } => {
+                            if streaming { println!(); streaming = false; }
+                            let summary = if input_summary.len() > 60 {
+                                format!("{}...", &input_summary[..60])
+                            } else {
+                                input_summary
+                            };
+                            println!("  {YELLOW}[tool]{RESET} {WHITE}{name}{RESET}: {DIM}{summary}{RESET}");
+                        }
+                        AgentEvent::ToolEnd { name, output, is_error, duration_ms } => {
+                            let icon = if is_error { format!("{RED}[-]{RESET}") } else { format!("{GREEN}[+]{RESET}") };
+                            let lines: Vec<&str> = output.lines().take(15).collect();
+                            for line in &lines {
+                                println!("  {DIM}  {line}{RESET}");
+                            }
+                            if output.lines().count() > 15 {
+                                println!("  {DIM}  ... (truncated){RESET}");
+                            }
+                            println!("  {icon} {DIM}{name} ({duration_ms}ms){RESET}");
+                            println!();
+                        }
+                        AgentEvent::ToolApprovalNeeded { tool_name, tool_input, permission } => {
+                            if streaming { println!(); streaming = false; }
+                            println!("  {YELLOW}{BOLD}Tool needs approval:{RESET}");
+                            println!("  {WHITE}{tool_name}{RESET}: {DIM}{tool_input}{RESET}");
+                            println!("  {DIM}Permission: {permission:?}{RESET}");
+                            print!("  {CYAN}Approve? (y/n):{RESET} ");
+                            io::stdout().flush().ok();
+                            let mut answer = String::new();
+                            io::stdin().read_line(&mut answer).ok();
+                            if answer.trim().to_lowercase().starts_with('y') {
+                                let _ = _cmd_tx.send(sovereign_query::AgentCommand::Approve);
+                            } else {
+                                let _ = _cmd_tx.send(sovereign_query::AgentCommand::Deny);
                             }
                         }
-                    }
-                    Err(e) => {
-                        println!("  {RED}Router error:{RESET} {e}");
-                        println!("  {DIM}Falling back to direct generation...{RESET}");
-                        let model = coord.force_model.as_deref()
-                            .unwrap_or(coord.recommendation.dev_model);
-                        match coord.generate(model, prompt).await {
-                            Ok(resp) => {
-                                for line in resp.lines() {
-                                    println!("  {GRAY}│{RESET} {line}");
-                                }
-                            }
-                            Err(e) => println!("  {RED}Error:{RESET} {e}"),
+                        AgentEvent::Done(metrics) => {
+                            if streaming { println!(); }
+                            println!("  {GRAY}│{RESET}");
+                            println!("  {DIM}{}{RESET}", metrics.summary());
+                            buddy.on_code_audited(metrics.eval_count);
+                            break;
+                        }
+                        AgentEvent::Error(e) => {
+                            if streaming { println!(); }
+                            println!("  {RED}Error:{RESET} {e}");
+                            println!("  {DIM}Is Ollama running? Try: ollama serve{RESET}");
+                            break;
                         }
                     }
                 }
