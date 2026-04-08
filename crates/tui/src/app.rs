@@ -31,11 +31,25 @@ const GREEN_OK: Color = Color::Rgb(166, 227, 161);
 const YELLOW_WARN: Color = Color::Rgb(249, 226, 175);
 const MAUVE: Color = Color::Rgb(203, 166, 247);
 
-/// Async generation results
+/// Messages from background tasks → TUI
 enum GenResult {
     RouteInfo(String),
     Response { text: String, summary: String },
     Error(String),
+    /// Agent is thinking (show in chat)
+    AgentThink(String),
+    /// Agent wants to execute a command — needs approval
+    AgentNeedApproval { command: String, reason: String },
+    /// Agent read a file (informational)
+    AgentReadFile(String),
+    /// Agent finished its loop
+    AgentDone(String),
+}
+
+/// Approval response from TUI → Agent
+enum ApprovalResponse {
+    Approved,
+    Denied,
 }
 
 /// Run the TUI with async generation
@@ -82,7 +96,9 @@ pub async fn run_tui() -> Result<()> {
     let mut gen_start: Option<Instant> = None;
     let mut findings: (usize, usize, usize, usize) = (0, 0, 0, 0);
 
-    let (mut gen_tx, mut gen_rx) = mpsc::channel::<GenResult>(8);
+    let (mut gen_tx, mut gen_rx) = mpsc::channel::<GenResult>(16);
+    let (mut approval_tx, mut approval_rx) = mpsc::channel::<ApprovalResponse>(1);
+    let mut waiting_agent_approval = false; // true when agent is paused waiting for y/n
 
     let refresh_ms = tui_refresh_ms(coordinator.hw.tier);
     let anim_ms = match coordinator.hw.tier {
@@ -135,6 +151,36 @@ pub async fn run_tui() -> Result<()> {
                     messages.push(ChatMsg::error(e));
                     loading.set(LoadingState::Idle);
                     gen_start = None;
+                }
+                GenResult::AgentThink(thought) => {
+                    messages.push(ChatMsg::route(format!("[think] {thought}")));
+                }
+                GenResult::AgentReadFile(path) => {
+                    messages.push(ChatMsg::route(format!("[read] {path}")));
+                }
+                GenResult::AgentNeedApproval { command, reason } => {
+                    // Show approval overlay for the command
+                    let (is_dangerous, danger_reason) = classify_command_risk(&command);
+                    let working_dir = std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("."))
+                        .to_string_lossy().to_string();
+                    approval_state = ApprovalState::Pending {
+                        action: ProposedAction::RunCommand {
+                            command,
+                            working_dir,
+                            is_dangerous,
+                            danger_reason: danger_reason.or(Some(reason)),
+                        },
+                        scroll: 0,
+                    };
+                    waiting_agent_approval = true;
+                    loading.set(LoadingState::Idle); // pause spinner while waiting
+                }
+                GenResult::AgentDone(answer) => {
+                    messages.push(ChatMsg::assistant(answer));
+                    loading.set(LoadingState::Idle);
+                    gen_start = None;
+                    scroll = 0;
                 }
             }
         }
@@ -215,34 +261,52 @@ pub async fn run_tui() -> Result<()> {
                 if approval_state.is_pending() {
                     match key.code {
                         KeyCode::Char('y') | KeyCode::Char('Y') => {
-                            // Apply the action
-                            if let ApprovalState::Pending { action, .. } = &approval_state {
-                                match action {
-                                    ProposedAction::EditFile { path, new_content, .. } => {
-                                        match diff::apply_edit(path, new_content) {
-                                            Ok(()) => messages.push(ChatMsg::route(format!("[+] Applied edit to {path}"))),
-                                            Err(e) => messages.push(ChatMsg::error(format!("Failed: {e}"))),
-                                        }
-                                        buddy.on_auto_fix();
-                                    }
-                                    ProposedAction::RunCommand { command, working_dir, .. } => {
+                            if waiting_agent_approval {
+                                // Send approval to agent — it will execute and continue
+                                let _ = approval_tx.try_send(ApprovalResponse::Approved);
+                                // Also execute the command here so the agent gets the observation
+                                if let ApprovalState::Pending { action, .. } = &approval_state {
+                                    if let ProposedAction::RunCommand { command, working_dir, .. } = action {
                                         match diff::execute_command(command, working_dir) {
                                             Ok(result) => {
                                                 messages.push(ChatMsg::route(result.summary()));
                                                 if !result.stdout.is_empty() {
                                                     messages.push(ChatMsg::system(result.stdout));
                                                 }
-                                                if !result.stderr.is_empty() {
-                                                    messages.push(ChatMsg::error(result.stderr));
-                                                }
                                             }
                                             Err(e) => messages.push(ChatMsg::error(e)),
                                         }
                                     }
-                                    ProposedAction::CreateFile { path, content } => {
-                                        match diff::apply_edit(path, content) {
-                                            Ok(()) => messages.push(ChatMsg::route(format!("[+] Created {path}"))),
-                                            Err(e) => messages.push(ChatMsg::error(format!("Failed: {e}"))),
+                                }
+                                waiting_agent_approval = false;
+                                loading.set(LoadingState::Thinking); // agent continues
+                            } else {
+                                // Direct action (from LLM diff detection)
+                                if let ApprovalState::Pending { action, .. } = &approval_state {
+                                    match action {
+                                        ProposedAction::EditFile { path, new_content, .. } => {
+                                            match diff::apply_edit(path, new_content) {
+                                                Ok(()) => messages.push(ChatMsg::route(format!("[+] Applied edit to {path}"))),
+                                                Err(e) => messages.push(ChatMsg::error(format!("Failed: {e}"))),
+                                            }
+                                            buddy.on_auto_fix();
+                                        }
+                                        ProposedAction::RunCommand { command, working_dir, .. } => {
+                                            match diff::execute_command(command, working_dir) {
+                                                Ok(result) => {
+                                                    messages.push(ChatMsg::route(result.summary()));
+                                                    if !result.stdout.is_empty() {
+                                                        messages.push(ChatMsg::system(result.stdout));
+                                                    }
+                                                }
+                                                Err(e) => messages.push(ChatMsg::error(e)),
+                                            }
+                                        }
+                                        ProposedAction::CreateFile { path, content } => {
+                                            match diff::apply_edit(path, content) {
+                                                Ok(()) => messages.push(ChatMsg::route(format!("[+] Created {path}"))),
+                                                Err(e) => messages.push(ChatMsg::error(format!("Failed: {e}"))),
+                                            }
                                         }
                                     }
                                 }
@@ -250,6 +314,11 @@ pub async fn run_tui() -> Result<()> {
                             approval_state = ApprovalState::None;
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            if waiting_agent_approval {
+                                let _ = approval_tx.try_send(ApprovalResponse::Denied);
+                                waiting_agent_approval = false;
+                                loading.set(LoadingState::Thinking);
+                            }
                             messages.push(ChatMsg::system("Action declined.".into()));
                             approval_state = ApprovalState::None;
                         }
@@ -306,7 +375,6 @@ pub async fn run_tui() -> Result<()> {
                                 gen_start = None;
                             }
                             prompt => {
-                                // Async generation
                                 loading.set(LoadingState::Routing);
                                 gen_start = Some(Instant::now());
                                 let prompt = prompt.to_string();
@@ -323,7 +391,11 @@ pub async fn run_tui() -> Result<()> {
                                 };
 
                                 let rag = if coordinator.rag_enabled { " +RAG" } else { "" };
-                                let _ = tx.send(GenResult::RouteInfo(format!("[{cat}{rag}] via {model}"))).await;
+                                let is_agentic = needs_agent(&prompt);
+                                let mode = if is_agentic { " Agent" } else { "" };
+                                let _ = tx.send(GenResult::RouteInfo(
+                                    format!("[{cat}{rag}{mode}] via {model}")
+                                )).await;
 
                                 // Build context
                                 let mut full = sovereign_core::system_prompt_for_tier(coordinator.hw.tier).to_string();
@@ -334,30 +406,46 @@ pub async fn run_tui() -> Result<()> {
                                             full.push_str("[Context]:\n");
                                             for r in &results {
                                                 let c = &r.chunk.content;
+                                                let safe_end = c.len().min(600);
+                                                let safe_end = (0..=safe_end).rev().find(|&i| c.is_char_boundary(i)).unwrap_or(0);
                                                 full.push_str(&format!("-- {} --\n{}\n",
-                                                    r.chunk.file_path.display(),
-                                                    &c[..c.len().min(600)]));
+                                                    r.chunk.file_path.display(), &c[..safe_end]));
                                             }
                                             full.push('\n');
                                         }
                                     }
                                 }
-                                full.push_str(&format!("User: {prompt}"));
 
-                                let m = model.clone();
-                                let client = sovereign_api::OllamaClient::new();
-                                tokio::spawn(async move {
-                                    match client.generate_with_metrics(&m, &full).await {
-                                        Ok(metrics) => {
-                                            let summary = metrics.summary();
-                                            let _ = tx.send(GenResult::Response {
-                                                text: metrics.response,
-                                                summary,
-                                            }).await;
+                                if is_agentic {
+                                    // ── Agent mode: ReAct loop with approval ──
+                                    let m = model.clone();
+                                    let approval_rx_for_agent = approval_rx;
+                                    // Create new approval channel for future use
+                                    let (new_atx, new_arx) = mpsc::channel::<ApprovalResponse>(1);
+                                    approval_tx = new_atx;
+                                    approval_rx = new_arx;
+
+                                    tokio::spawn(async move {
+                                        run_agent_loop(tx, approval_rx_for_agent, m, prompt, full).await;
+                                    });
+                                } else {
+                                    // ── Simple generation ──
+                                    full.push_str(&format!("User: {prompt}"));
+                                    let m = model.clone();
+                                    let client = sovereign_api::OllamaClient::new();
+                                    tokio::spawn(async move {
+                                        match client.generate_with_metrics(&m, &full).await {
+                                            Ok(metrics) => {
+                                                let summary = metrics.summary();
+                                                let _ = tx.send(GenResult::Response {
+                                                    text: metrics.response,
+                                                    summary,
+                                                }).await;
+                                            }
+                                            Err(e) => { let _ = tx.send(GenResult::Error(format!("{e}"))).await; }
                                         }
-                                        Err(e) => { let _ = tx.send(GenResult::Error(format!("{e}"))).await; }
-                                    }
-                                });
+                                    });
+                                }
                             }
                         }
                     }
@@ -650,6 +738,151 @@ const HELP: &str = "Commands
   /quit            Exit
 Scroll: Up/Down
 Approval: (y)es (n)o (e)xplain (Esc)cancel";
+
+/// Detect if a prompt needs the full ReAct agent (vs simple generation)
+fn needs_agent(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    let signals = [
+        // File system questions
+        "carpeta", "directorio", "folder", "directory", "pwd", "where am i",
+        "en que carpeta", "que archivos", "what files", "list files", "ls",
+        // Action requests
+        "ejecuta", "execute", "run ", "corre ", "instala", "install",
+        "crea ", "create ", "borra ", "delete ", "mueve", "move",
+        // Investigation
+        "analiza", "analyze", "revisa", "check ", "investiga", "investigate",
+        "read the", "lee el", "mira el", "look at", "find the",
+        "que hay en", "what's in", "show me",
+        // Code actions
+        "fix ", "arregla", "debug", "compile", "build",
+    ];
+    signals.iter().any(|s| lower.contains(s))
+}
+
+/// Run the ReAct agent loop in a background task
+async fn run_agent_loop(
+    tx: mpsc::Sender<GenResult>,
+    mut approval_rx: mpsc::Receiver<ApprovalResponse>,
+    model: String,
+    prompt: String,
+    system_context: String,
+) {
+    let client = sovereign_api::OllamaClient::new();
+    let react_prompt = format!(
+        "{system_context}\n\
+         You are a ReAct agent. For the user's request, follow this loop:\n\
+         1. Thought: Reason about what you need to do.\n\
+         2. Action: Choose ONE action:\n\
+            - READ_FILE <path> — read a file\n\
+            - EXECUTE <command> — run a shell command\n\
+            - ANSWER <response> — give your final answer\n\
+         3. You'll receive the result, then continue.\n\
+         Output ONE Thought and ONE Action per turn.\n\n\
+         User: {prompt}"
+    );
+
+    let mut context = react_prompt;
+    let max_iterations = 6;
+
+    for i in 0..max_iterations {
+        let _ = tx.send(GenResult::AgentThink(format!("Step {}/{max_iterations}...", i + 1))).await;
+
+        // Ask LLM for next thought + action
+        let response = match client.generate(&model, &context).await {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(GenResult::Error(format!("Agent error: {e}"))).await;
+                return;
+            }
+        };
+
+        // Parse thought
+        let thought = response.lines()
+            .take_while(|l| {
+                let t = l.trim();
+                !t.starts_with("Action:") && !t.starts_with("READ_FILE")
+                    && !t.starts_with("EXECUTE") && !t.starts_with("ANSWER")
+            })
+            .collect::<Vec<_>>().join(" ");
+
+        if !thought.trim().is_empty() {
+            let short = if thought.len() > 120 { format!("{}...", &thought[..120]) } else { thought.clone() };
+            let _ = tx.send(GenResult::AgentThink(short)).await;
+        }
+
+        // Parse action
+        let action_line = response.lines().find(|l| {
+            let t = l.trim();
+            t.starts_with("Action:") || t.starts_with("READ_FILE")
+                || t.starts_with("EXECUTE") || t.starts_with("ANSWER")
+        });
+
+        let action_text = action_line.unwrap_or("ANSWER I couldn't determine what to do.");
+        let action_trimmed = action_text.trim()
+            .strip_prefix("Action: ").unwrap_or(action_text.trim());
+
+        if let Some(path) = action_trimmed.strip_prefix("READ_FILE ") {
+            let path = path.trim();
+            let _ = tx.send(GenResult::AgentReadFile(path.to_string())).await;
+
+            let observation = match std::fs::read_to_string(path) {
+                Ok(content) => {
+                    if content.len() > 3000 {
+                        format!("{}\n... [truncated, {} bytes total]", &content[..3000], content.len())
+                    } else {
+                        content
+                    }
+                }
+                Err(e) => format!("Error reading {path}: {e}"),
+            };
+            context.push_str(&format!("\n{response}\nObservation: {observation}"));
+
+        } else if let Some(cmd) = action_trimmed.strip_prefix("EXECUTE ") {
+            let cmd = cmd.trim().to_string();
+
+            // Ask user for approval
+            let _ = tx.send(GenResult::AgentNeedApproval {
+                command: cmd.clone(),
+                reason: thought.chars().take(100).collect(),
+            }).await;
+
+            // Wait for approval
+            match approval_rx.recv().await {
+                Some(ApprovalResponse::Approved) => {
+                    let cwd = std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("."))
+                        .to_string_lossy().to_string();
+                    let observation = match diff::execute_command(&cmd, &cwd) {
+                        Ok(result) => {
+                            if result.success {
+                                result.stdout
+                            } else {
+                                format!("Exit {}: {}", result.exit_code, result.stderr)
+                            }
+                        }
+                        Err(e) => format!("Failed: {e}"),
+                    };
+                    context.push_str(&format!("\n{response}\nObservation: {observation}"));
+                }
+                Some(ApprovalResponse::Denied) | None => {
+                    context.push_str(&format!("\n{response}\nObservation: Command denied by user."));
+                }
+            }
+
+        } else if let Some(answer) = action_trimmed.strip_prefix("ANSWER ") {
+            let _ = tx.send(GenResult::AgentDone(answer.to_string())).await;
+            return;
+        } else {
+            // No recognizable action — treat entire response as answer
+            let _ = tx.send(GenResult::AgentDone(response)).await;
+            return;
+        }
+    }
+
+    let _ = tx.send(GenResult::AgentDone(
+        "Reached maximum steps. Here's what I found based on my analysis.".into()
+    )).await;
+}
 
 /// Detect if LLM response contains a proposed action (edit or command)
 fn detect_proposed_action(response: &str) -> Option<ProposedAction> {
