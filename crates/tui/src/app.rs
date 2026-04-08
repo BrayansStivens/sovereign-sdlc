@@ -75,7 +75,7 @@ pub async fn run_tui() -> Result<()> {
     let mut gen_start: Option<Instant> = None;
     let mut findings: (usize, usize, usize, usize) = (0, 0, 0, 0);
 
-    let (gen_tx, mut gen_rx) = mpsc::channel::<GenResult>(8);
+    let (mut gen_tx, mut gen_rx) = mpsc::channel::<GenResult>(8);
 
     let refresh_ms = tui_refresh_ms(coordinator.hw.tier);
     let anim_ms = match coordinator.hw.tier {
@@ -295,7 +295,19 @@ pub async fn run_tui() -> Result<()> {
                     KeyCode::Right if cursor_pos < input.len() => cursor_pos += 1,
                     KeyCode::Up => scroll = scroll.saturating_add(3),
                     KeyCode::Down => scroll = scroll.saturating_sub(3),
-                    KeyCode::Esc => { buddy.save(); running = false; }
+                    KeyCode::Esc => {
+                        if loading.is_active() {
+                            // Cancel generation — drop the channel, stop waiting
+                            loading.set(LoadingState::Idle);
+                            gen_start = None;
+                            messages.push(ChatMsg::system("Generation cancelled.".into()));
+                            // Create fresh channel (old spawned task will fail to send)
+                            let (new_tx, new_rx) = mpsc::channel::<GenResult>(8);
+                            gen_tx = new_tx;
+                            gen_rx = new_rx;
+                        }
+                        // Esc when idle does nothing — use Ctrl+C or /quit to exit
+                    }
                     _ => {}
                 }
             }

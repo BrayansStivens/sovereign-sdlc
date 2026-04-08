@@ -96,12 +96,11 @@ impl LoadingAnimation {
                 format!("{} Routing...", self.spinner_char())
             }
             LoadingState::Thinking => {
-                format!("{} Thinking{}", self.spinner_char(), self.dots())
+                format!("{} Thinking{}  (Esc to cancel)", self.spinner_char(), self.dots())
             }
             LoadingState::Generating { elapsed_secs } => {
-                // * Generating... [ >_ -- tok/s | ~ 3s | # -- tokens ]
                 format!(
-                    "* Generating{} [ {} -- tok/s | ~ {}s ]",
+                    "* Generating{} [ {} -- tok/s | ~ {}s ]  (Esc to cancel)",
                     self.dots(), self.cursor(), elapsed_secs,
                 )
             }
