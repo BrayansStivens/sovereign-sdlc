@@ -202,50 +202,7 @@ The indexer automatically skips:
 
 ## Buddy System
 
-Every project gets a companion that levels up as you work:
-
-### Species (7)
-
-```
-Gato:    =^.^=  /  =^-^=  /  =>.<=
-Buho:    (O,O)  /  (-,O)  /  (X,X)
-Dragon:  (@\___ /  (O\___ /  (X\***
-Fractal: {*_*}  /  {~_~}  /  {!_!}
-Raven:   (o v o)/  (- v -)/  (O V O)
-Spirit:  -{_}-  /  ~{_}~  /  !{_}!
-Golem:   [O_O]  /  [o_o]  /  [X_X]
-```
-
-### Rarity (Gacha Roll on Project Init)
-
-| Rarity | Chance | Color |
-|---|---|---|
-| Common | 75% | White |
-| Uncommon | 15% | Green |
-| Rare | 6% | Blue |
-| Epic | 3% | Magenta |
-| **SOVEREIGN** | **1%** | **Gold** |
-
-### Reactive Moods
-
-| Condition | Mood | Behavior |
-|---|---|---|
-| Critical security finding | **ANGRY** | Red, vibrates |
-| Models disagree (Council) | **Confused** | Magenta |
-| CPU/RAM > 90% | Exhausted | Gray |
-| Loading old session | Remembering | Blue |
-| Clean code scan | Happy | Green |
-
-### XP System
-
-| Action | XP |
-|---|---|
-| Lines of code audited | +1 per 10 lines |
-| Vulnerability caught | +25 |
-| Auto-fix applied | +30 |
-| Clean scan (0 findings) | +50 |
-
-Level up formula: `(level + 1) * 100` XP needed.
+Every project gets a companion that levels up as you audit code. 11 species, 5 rarity tiers, reactive moods. Run `/buddy` in-app to see yours.
 
 ## Project Data
 
