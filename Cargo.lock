@@ -1599,7 +1599,7 @@ dependencies = [
 
 [[package]]
 name = "sovereign-api"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "ollama-rs",
@@ -1613,7 +1613,7 @@ dependencies = [
 
 [[package]]
 name = "sovereign-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "sovereign-api",
@@ -1628,7 +1628,7 @@ dependencies = [
 
 [[package]]
 name = "sovereign-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1649,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "sovereign-query"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1665,7 +1665,7 @@ dependencies = [
 
 [[package]]
 name = "sovereign-tools"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1683,7 +1683,7 @@ dependencies = [
 
 [[package]]
 name = "sovereign-tui"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
