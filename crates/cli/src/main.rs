@@ -1,6 +1,20 @@
 use anyhow::Result;
 use std::path::PathBuf;
 
+// ANSI color codes
+const RESET: &str = "\x1b[0m";
+const BOLD: &str = "\x1b[1m";
+const DIM: &str = "\x1b[2m";
+const CYAN: &str = "\x1b[36m";
+const GREEN: &str = "\x1b[32m";
+const YELLOW: &str = "\x1b[33m";
+const RED: &str = "\x1b[31m";
+const MAGENTA: &str = "\x1b[35m";
+const BLUE: &str = "\x1b[34m";
+const GRAY: &str = "\x1b[90m";
+const WHITE: &str = "\x1b[97m";
+const BG_DARK: &str = "\x1b[48;5;235m";
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -19,22 +33,48 @@ async fn main() -> Result<()> {
 
 async fn run_repl() -> Result<()> {
     use sovereign_query::Coordinator;
+    use sovereign_tui::Buddy;
     use std::io::{self, Write};
 
     let mut coord = Coordinator::new();
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut buddy = Buddy::load_or_create(&project_root);
 
-    println!("╔══════════════════════════════════════════════╗");
-    println!("║       Sovereign SDLC v{}              ║", env!("CARGO_PKG_VERSION"));
-    println!("║     S-SDLC Security Agent (REPL mode)       ║");
-    println!("╚══════════════════════════════════════════════╝");
+    // ── Header ──
     println!();
-    println!("{}", coord.status());
+    println!("  {CYAN}{BOLD}╔══════════════════════════════════════════════════╗{RESET}");
+    println!("  {CYAN}{BOLD}║{RESET}  {WHITE}{BOLD}Sovereign SDLC{RESET} {DIM}v{}{RESET}                          {CYAN}{BOLD}║{RESET}", env!("CARGO_PKG_VERSION"));
+    println!("  {CYAN}{BOLD}║{RESET}  {DIM}Local AI Agent for Secure Development{RESET}         {CYAN}{BOLD}║{RESET}");
+    println!("  {CYAN}{BOLD}╚══════════════════════════════════════════════════╝{RESET}");
     println!();
-    println!("  Type /help for commands. Ctrl-C to quit.");
-    println!("─────────────────────────────────────────────────");
+
+    // ── Status ──
+    print_status(&coord, &buddy);
+
+    // ── Buddy greeting ──
+    let (idle, _, _) = buddy.data.species.frames();
+    let rarity_color = match buddy.data.rarity {
+        sovereign_tui::buddy::Rarity::Common => WHITE,
+        sovereign_tui::buddy::Rarity::Uncommon => GREEN,
+        sovereign_tui::buddy::Rarity::Rare => BLUE,
+        sovereign_tui::buddy::Rarity::Epic => MAGENTA,
+        sovereign_tui::buddy::Rarity::Sovereign => YELLOW,
+    };
+    println!("  {rarity_color}{}{RESET}", idle[0]);
+    println!("  {rarity_color}{BOLD}{}{RESET}", idle[1]);
+    println!("  {rarity_color}{}{RESET}", idle[2]);
+    println!("  {DIM}{} the {} [{}] Lv.{}{RESET}",
+        buddy.data.name, buddy.data.species.display_name(),
+        buddy.data.rarity.label(), buddy.data.level);
+    println!();
+
+    println!("  {DIM}Type {WHITE}/help{RESET}{DIM} for commands. {WHITE}Ctrl+C{RESET}{DIM} to quit.{RESET}");
+    let sep = "-".repeat(50);
+    println!("  {GRAY}{sep}{RESET}");
 
     loop {
-        print!("\n  sovereign > ");
+        // ── Prompt ──
+        print!("\n  {CYAN}{BOLD}>{RESET} ");
         io::stdout().flush()?;
 
         let mut input = String::new();
@@ -44,60 +84,199 @@ async fn run_repl() -> Result<()> {
 
         match input {
             "/quit" | "/q" | "/exit" => {
-                println!("  Goodbye.");
+                buddy.save();
+                println!("\n  {DIM}Goodbye. {} waves.{RESET}", buddy.data.name);
                 break;
             }
             "/status" | "/s" => {
-                println!("\n{}", coord.status());
+                println!();
+                print_status(&coord, &buddy);
+            }
+            "/buddy" | "/b" => {
+                print_buddy(&buddy);
             }
             "/help" | "/h" => {
-                println!("\n  /model <name>     Switch model (SafeLoad validated)");
-                println!("  /index [path]     Index project for RAG memory");
-                println!("  /status           Hardware + model + memory status");
-                println!("  /scan [path]      Security scan (SAST/SCA)");
-                println!("  /audit            Toggle OWASP audit mode");
-                println!("  /quit             Exit");
+                println!();
+                println!("  {BOLD}{WHITE}Commands{RESET}");
+                let sep = "-".repeat(40);
+                println!("  {GRAY}{sep}{RESET}");
+                println!("  {CYAN}/model{RESET} {DIM}<name>{RESET}     Switch LLM model");
+                println!("  {CYAN}/index{RESET} {DIM}[path]{RESET}     Index project for RAG");
+                println!("  {CYAN}/status{RESET}            Hardware + model info");
+                println!("  {CYAN}/buddy{RESET}             Companion stats");
+                println!("  {CYAN}/scan{RESET} {DIM}[path]{RESET}      Security scan");
+                println!("  {CYAN}/help{RESET}              This help");
+                println!("  {CYAN}/quit{RESET}              Exit");
+                println!();
+                println!("  {DIM}Or just type a question to chat with the AI.{RESET}");
             }
             cmd if cmd.starts_with("/model ") => {
                 let model = cmd.strip_prefix("/model ").unwrap().trim();
                 let result = coord.set_model(model);
-                println!("  {result}");
+                println!("  {YELLOW}{result}{RESET}");
+            }
+            "/model" => {
+                println!("  {WHITE}Active:{RESET} {GREEN}{}{RESET}", coord.force_model.as_deref()
+                    .unwrap_or(coord.recommendation.dev_model));
+                println!("  {DIM}Usage: /model <name>{RESET}");
             }
             cmd if cmd.starts_with("/index") => {
                 let path = cmd.strip_prefix("/index").unwrap().trim();
                 let target = if path.is_empty() {
-                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                    project_root.clone()
                 } else {
                     PathBuf::from(path)
                 };
 
-                println!("  Indexing {}... (tier: {})", target.display(), coord.hw.tier);
-                println!("  Embedding model: nomic-embed-text");
-                println!("  This may take a moment on CPU-only systems.\n");
+                println!();
+                println!("  {YELLOW}Indexing{RESET} {WHITE}{}{RESET}", target.display());
+                println!("  {DIM}Tier: {} | Embedding: nomic-embed-text{RESET}", coord.hw.tier);
+                println!();
 
                 match coord.index_project(&target).await {
                     Ok(result) => {
-                        println!("  {result}");
-                        println!("  RAG memory is now active.");
+                        buddy.on_code_audited(result.chunks_indexed as u64 * 20);
+                        buddy.save();
+                        println!("  {GREEN}{BOLD}Done.{RESET} {result}");
+                        println!("  {DIM}RAG memory active. {} gained XP!{RESET}", buddy.data.name);
                     }
-                    Err(e) => println!("  [INDEX ERROR] {e}"),
+                    Err(e) => println!("  {RED}Error:{RESET} {e}"),
+                }
+            }
+            cmd if cmd.starts_with("/scan") => {
+                let path = cmd.strip_prefix("/scan").unwrap().trim();
+                let target = if path.is_empty() {
+                    project_root.clone()
+                } else {
+                    PathBuf::from(path)
+                };
+                println!("  {YELLOW}Scanning{RESET} {WHITE}{}{RESET}...", target.display());
+
+                let scanner = sovereign_tools::SecurityScanner::new();
+                let reports = scanner.scan_all(&target);
+                if reports.is_empty() {
+                    println!("  {DIM}No security tools available. Install: semgrep, cargo-audit{RESET}");
+                } else {
+                    let (c, e, w, i) = sovereign_tools::SecurityScanner::severity_counts(&reports);
+                    let total = sovereign_tools::SecurityScanner::total_findings(&reports);
+
+                    for report in &reports {
+                        println!("  {BOLD}{}{RESET}: {}", report.tool, report.summary());
+                    }
+
+                    let risk_color = if c > 0 { RED } else if e > 0 { YELLOW } else { GREEN };
+                    println!("\n  {risk_color}{BOLD}{total} findings{RESET} ({RED}{c} crit{RESET} {YELLOW}{e} err{RESET} {DIM}{w} warn {i} info{RESET})");
+
+                    buddy.update_code_quality(w as u32, total);
+                    if c > 0 { buddy.on_vuln_caught(); }
+                    buddy.save();
                 }
             }
             prompt => {
+                // Route and generate
                 match coord.route_prompt(prompt).await {
                     Ok((cat, model)) => {
-                        let rag_tag = if coord.rag_enabled { " +RAG" } else { "" };
-                        println!("  [{cat}{rag_tag}] → {model}");
+                        let rag = if coord.rag_enabled { format!(" {GREEN}+RAG{RESET}") } else { String::new() };
+                        println!("  {DIM}[{cat}{rag}{DIM}] {GRAY}via {model}{RESET}");
+                        println!();
+
                         match coord.generate(&model, prompt).await {
-                            Ok(resp) => println!("\n{resp}"),
-                            Err(e) => println!("  [ERROR] {e}"),
+                            Ok(resp) => {
+                                buddy.on_code_audited(resp.lines().count() as u64);
+                                // Format response with subtle left border
+                                for line in resp.lines() {
+                                    println!("  {GRAY}│{RESET} {line}");
+                                }
+                                println!("  {GRAY}│{RESET}");
+                            }
+                            Err(e) => {
+                                println!("  {RED}Error:{RESET} {e}");
+                                println!("  {DIM}Is Ollama running? Is '{model}' pulled?{RESET}");
+                                println!("  {DIM}Try: ollama pull {model}{RESET}");
+                            }
                         }
                     }
-                    Err(e) => println!("  [ERROR] {e}"),
+                    Err(e) => {
+                        println!("  {RED}Router error:{RESET} {e}");
+                        println!("  {DIM}Falling back to direct generation...{RESET}");
+                        let model = coord.force_model.as_deref()
+                            .unwrap_or(coord.recommendation.dev_model);
+                        match coord.generate(model, prompt).await {
+                            Ok(resp) => {
+                                for line in resp.lines() {
+                                    println!("  {GRAY}│{RESET} {line}");
+                                }
+                            }
+                            Err(e) => println!("  {RED}Error:{RESET} {e}"),
+                        }
+                    }
                 }
             }
         }
     }
 
     Ok(())
+}
+
+fn print_status(coord: &sovereign_query::Coordinator, buddy: &sovereign_tui::Buddy) {
+    let hw = &coord.hw;
+    let rec = hw.tier.recommended_models();
+    let ram_pct = ((hw.total_ram_gb - hw.available_ram_gb) / hw.total_ram_gb * 100.0) as u16;
+    let ram_color = if ram_pct > 85 { RED } else if ram_pct > 65 { YELLOW } else { GREEN };
+
+    println!("  {BOLD}{WHITE}Hardware{RESET}");
+    println!("  {DIM}Platform{RESET}  {WHITE}{}{RESET}", hw.platform);
+    println!("  {DIM}Tier{RESET}      {CYAN}{BOLD}{}{RESET}", hw.tier);
+    println!("  {DIM}RAM{RESET}       {ram_color}{:.1}/{:.1} GB{RESET} {DIM}({:.1} free){RESET}",
+        hw.total_ram_gb - hw.available_ram_gb, hw.total_ram_gb, hw.available_ram_gb);
+    println!();
+    println!("  {BOLD}{WHITE}Models{RESET}");
+    println!("  {DIM}Dev{RESET}       {GREEN}{}{RESET}", rec.dev_model);
+    println!("  {DIM}Audit{RESET}     {YELLOW}{}{RESET}", rec.audit_model);
+    println!("  {DIM}Active{RESET}    {CYAN}{}{RESET}",
+        coord.force_model.as_deref().unwrap_or(rec.dev_model));
+    println!();
+    println!("  {BOLD}{WHITE}Knowledge{RESET}");
+    let rag_status = if coord.rag_enabled {
+        format!("{GREEN}{} chunks{RESET}", coord.memory.chunk_count())
+    } else {
+        format!("{DIM}none — run /index{RESET}")
+    };
+    let grimoire_count = coord.grimoire.as_ref()
+        .and_then(|g| g.count().ok()).unwrap_or(0);
+    println!("  {DIM}RAG{RESET}       {rag_status}");
+    println!("  {DIM}Grimoire{RESET}  {DIM}{grimoire_count} patterns{RESET}");
+    println!();
+}
+
+fn print_buddy(buddy: &sovereign_tui::Buddy) {
+    let (idle, _, _) = buddy.data.species.frames();
+    let rarity_color = match buddy.data.rarity {
+        sovereign_tui::buddy::Rarity::Common => WHITE,
+        sovereign_tui::buddy::Rarity::Uncommon => GREEN,
+        sovereign_tui::buddy::Rarity::Rare => BLUE,
+        sovereign_tui::buddy::Rarity::Epic => MAGENTA,
+        sovereign_tui::buddy::Rarity::Sovereign => YELLOW,
+    };
+
+    println!();
+    println!("  {rarity_color}{}{RESET}", idle[0]);
+    println!("  {rarity_color}{BOLD}{}{RESET}", idle[1]);
+    println!("  {rarity_color}{}{RESET}", idle[2]);
+    println!();
+    println!("  {rarity_color}{BOLD}{}{RESET} {DIM}the {}{RESET} {rarity_color}[{}]{RESET}",
+        buddy.data.name, buddy.data.species.display_name(), buddy.data.rarity.label());
+    println!("  {DIM}Level{RESET} {WHITE}{BOLD}{}{RESET}  {DIM}XP{RESET} {CYAN}{}/{}{RESET}",
+        buddy.data.level, buddy.data.xp, buddy.data.xp_for_next_level());
+    println!("  {DIM}Mood{RESET}  {}{}{RESET}", buddy.mood.color_ansi(), buddy.mood.label());
+    println!();
+    println!("  {DIM}Lines audited{RESET}  {WHITE}{}{RESET}", buddy.data.lines_audited);
+    println!("  {DIM}Vulns caught{RESET}   {WHITE}{}{RESET}", buddy.data.vulns_caught);
+    println!("  {DIM}Auto-fixes{RESET}     {WHITE}{}{RESET}", buddy.data.auto_fixes);
+    println!("  {DIM}Born{RESET}           {DIM}{}{RESET}", buddy.data.created_at);
+    println!();
+}
+
+fn hline(n: usize) -> String {
+    "-".repeat(n)
 }

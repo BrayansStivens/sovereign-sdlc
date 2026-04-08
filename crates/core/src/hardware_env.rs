@@ -594,17 +594,25 @@ fn detect_platform(cpu_name: &str, core_count: usize, _total_ram_gb: f64) -> Pla
 // ────────────────────────────────────────────────────────
 
 fn classify_tier(platform: &Platform, available_ram_gb: f64) -> PerformanceTier {
-    let usable = available_ram_gb - SAFE_LOAD_BUFFER_GB;
-
-    // GPU presence boosts the tier (VRAM offloads model layers)
-    let gpu_bonus = match platform {
-        Platform::CudaGpu { vram_gb, .. } => *vram_gb,
-        Platform::AppleSilicon { .. } => 0.0, // Unified memory — already counted
-        Platform::VulkanGpu { vram_gb, .. } => *vram_gb * 0.7, // Less efficient than CUDA
-        Platform::CpuOnly { .. } => 0.0,
+    let effective = match platform {
+        // Apple Silicon: unified memory — macOS releases cache under pressure,
+        // so use total unified memory (minus buffer) for tier classification,
+        // not just currently-free RAM.
+        Platform::AppleSilicon { unified_memory_gb, .. } => {
+            (*unified_memory_gb as f64 - SAFE_LOAD_BUFFER_GB).max(0.0)
+        }
+        // Discrete GPU: available RAM + VRAM offload
+        Platform::CudaGpu { vram_gb, .. } => {
+            (available_ram_gb - SAFE_LOAD_BUFFER_GB) + *vram_gb
+        }
+        Platform::VulkanGpu { vram_gb, .. } => {
+            (available_ram_gb - SAFE_LOAD_BUFFER_GB) + (*vram_gb * 0.7)
+        }
+        // CPU only: conservative — only free RAM minus buffer
+        Platform::CpuOnly { .. } => {
+            available_ram_gb - SAFE_LOAD_BUFFER_GB
+        }
     };
-
-    let effective = usable + gpu_bonus;
 
     if effective >= 20.0 {
         PerformanceTier::HighEnd
@@ -728,6 +736,15 @@ mod tests {
         assert_eq!(classify_tier(&cpu_only, 14.0), PerformanceTier::Small);
         assert_eq!(classify_tier(&cpu_only, 18.0), PerformanceTier::Medium);
         assert_eq!(classify_tier(&cpu_only, 26.0), PerformanceTier::HighEnd);
+
+        // Apple Silicon uses total unified memory, not free RAM
+        let m5 = Platform::AppleSilicon {
+            chip: "M5".into(), unified_memory_gb: 24, gpu_cores: 10,
+            perf_cores: 6, efficiency_cores: 4,
+        };
+        // 24 - 4 = 20 effective → HighEnd regardless of current free RAM
+        assert_eq!(classify_tier(&m5, 8.0), PerformanceTier::HighEnd);
+        assert_eq!(classify_tier(&m5, 11.0), PerformanceTier::HighEnd);
     }
 
     #[test]

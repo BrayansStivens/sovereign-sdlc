@@ -264,6 +264,20 @@ impl Mood {
             Mood::Remembering => "Remembering...",
         }
     }
+
+    /// ANSI color code for terminal output (REPL mode)
+    pub fn color_ansi(&self) -> &'static str {
+        match self {
+            Mood::Happy       => "\x1b[32m",
+            Mood::Idle        => "\x1b[97m",
+            Mood::Working     => "\x1b[36m",
+            Mood::Stressed    => "\x1b[33m",
+            Mood::Angry       => "\x1b[31m",
+            Mood::Exhausted   => "\x1b[90m",
+            Mood::Confused    => "\x1b[35m",
+            Mood::Remembering => "\x1b[34m",
+        }
+    }
 }
 
 // ────────────────────────────────────────────────────────
