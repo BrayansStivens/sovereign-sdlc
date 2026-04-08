@@ -111,7 +111,8 @@ pub async fn run_tui() -> Result<()> {
 
     let mut input = String::new();
     let mut cursor_pos: usize = 0;
-    let mut scroll: u16 = 0;
+    let mut auto_scroll = true; // true = stick to bottom, false = user scrolled up
+    let mut scroll_offset: u16 = 0; // only used when auto_scroll=false
     let mut running = true;
     let mut paste_range: Option<(usize, usize)> = None;
     let mut paste_counter: u32 = 0;
@@ -171,7 +172,7 @@ pub async fn run_tui() -> Result<()> {
 
                     loading.set(LoadingState::Idle);
                     gen_start = None;
-                    scroll = 0;
+                    auto_scroll = true;
                 }
                 GenResult::Error(e) => {
                     messages.push(ChatMsg::error(e));
@@ -206,7 +207,7 @@ pub async fn run_tui() -> Result<()> {
                     messages.push(ChatMsg::assistant(answer));
                     loading.set(LoadingState::Idle);
                     gen_start = None;
-                    scroll = 0;
+                    auto_scroll = true;
                 }
             }
         }
@@ -253,7 +254,7 @@ pub async fn run_tui() -> Result<()> {
                 .split(h_split[1]);
 
             // ── Chat ──
-            render_chat(frame, &messages, scroll, h_split[0]);
+            render_chat(frame, &messages, auto_scroll, scroll_offset, h_split[0]);
 
             // ── Hardware ──
             render_hw(frame, cpu_pct, ram_pct, &tier, &active_model, sidebar[0]);
@@ -411,7 +412,7 @@ pub async fn run_tui() -> Result<()> {
                         paste_range = None;
                         input.clear();
                         cursor_pos = 0;
-                        scroll = 0;
+                        auto_scroll = true;
                         messages.push(ChatMsg::user(user_input.clone()));
 
                         match user_input.trim() {
@@ -558,8 +559,18 @@ pub async fn run_tui() -> Result<()> {
                     }
                     KeyCode::Left => cursor_pos = cursor_pos.saturating_sub(1),
                     KeyCode::Right if cursor_pos < input.len() => cursor_pos += 1,
-                    KeyCode::Up => scroll = scroll.saturating_add(3),
-                    KeyCode::Down => scroll = scroll.saturating_sub(3),
+                    KeyCode::Up => {
+                        auto_scroll = false;
+                        scroll_offset = scroll_offset.saturating_add(3);
+                    }
+                    KeyCode::Down => {
+                        if scroll_offset <= 3 {
+                            scroll_offset = 0;
+                            auto_scroll = true;
+                        } else {
+                            scroll_offset = scroll_offset.saturating_sub(3);
+                        }
+                    }
                     KeyCode::Esc => {
                         if loading.is_active() {
                             // Cancel generation — drop the channel, stop waiting
@@ -585,8 +596,7 @@ pub async fn run_tui() -> Result<()> {
 
 // ── Render helpers ──
 
-/// scroll_back = 0 means auto-scroll to bottom. >0 means user scrolled up N lines.
-fn render_chat(frame: &mut Frame, messages: &[ChatMsg], scroll_back: u16, area: Rect) {
+fn render_chat(frame: &mut Frame, messages: &[ChatMsg], auto_scroll: bool, scroll_offset: u16, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     for msg in messages {
         let (icon, color) = match msg.role {
@@ -607,14 +617,14 @@ fn render_chat(frame: &mut Frame, messages: &[ChatMsg], scroll_back: u16, area: 
         lines.push(Line::from(""));
     }
 
-    // Auto-scroll: calculate scroll position from bottom
-    let visible_height = area.height.saturating_sub(2) as usize; // minus borders
+    // Scroll calculation
+    let visible_height = area.height.saturating_sub(2) as usize;
     let total_lines = lines.len();
     let max_scroll = total_lines.saturating_sub(visible_height) as u16;
-    let scroll_pos = if scroll_back == 0 {
-        max_scroll // auto-scroll to bottom
+    let scroll_pos = if auto_scroll {
+        max_scroll // always show bottom
     } else {
-        max_scroll.saturating_sub(scroll_back) // user scrolled back
+        max_scroll.saturating_sub(scroll_offset)
     };
 
     let block = Block::default()
@@ -809,45 +819,38 @@ fn needs_agent(prompt: &str) -> bool {
     signals.iter().any(|s| lower.contains(s))
 }
 
-/// Map common user intents to automatic tool calls.
-/// Returns (command_to_run, description) if we can help automatically.
-fn intent_to_command(prompt: &str) -> Option<(&'static str, &'static str)> {
-    let lower = prompt.to_lowercase();
+/// Ask the LLM to classify if the prompt needs a system command.
+/// Returns the command to run, or None if no command needed.
+/// Uses a tiny fast prompt that even 7B models handle well.
+async fn classify_intent(client: &sovereign_api::OllamaClient, model: &str, prompt: &str) -> Option<String> {
+    let classifier_prompt = format!(
+        "Does this user message require running a terminal command to answer? \
+         If YES, reply with ONLY the exact command (nothing else). \
+         If NO, reply with ONLY the word NONE.\n\n\
+         Examples:\n\
+         User: en que carpeta estamos?\nCommand: pwd\n\
+         User: que archivos hay?\nCommand: ls -la\n\
+         User: muestra el git status\nCommand: git status\n\
+         User: explica que es rust\nCommand: NONE\n\
+         User: hola como estas\nCommand: NONE\n\
+         User: lee el archivo main.rs\nCommand: cat main.rs\n\
+         User: cuanto pesa este proyecto\nCommand: du -sh .\n\
+         User: que version de node tengo\nCommand: node --version\n\n\
+         User: {prompt}\nCommand:"
+    );
 
-    // Directory questions → pwd
-    if lower.contains("carpeta") || lower.contains("directorio") || lower.contains("folder")
-        || lower.contains("directory") || lower.contains("pwd") || lower.contains("where am i")
-        || lower.contains("donde estamos") || lower.contains("que carpeta")
+    let response = client.generate(model, &classifier_prompt).await.ok()?;
+    let cmd = response.trim().to_string();
+
+    // Filter out non-commands
+    if cmd.is_empty() || cmd == "NONE" || cmd.to_uppercase() == "NONE"
+        || cmd.len() > 200 || cmd.contains('\n') || cmd.starts_with("I ")
+        || cmd.starts_with("The ") || cmd.starts_with("No ") || cmd.starts_with("This ")
     {
-        return Some(("pwd", "Current directory"));
+        return None;
     }
 
-    // List files → ls
-    if lower.contains("que archivos") || lower.contains("what files") || lower.contains("list files")
-        || lower.contains("show files") || lower.contains("muestra archivos")
-        || (lower.contains("ls") && lower.len() < 20)
-    {
-        return Some(("ls -la", "List files"));
-    }
-
-    // Git status
-    if lower.contains("git status") || lower.contains("estado del repo")
-        || lower.contains("cambios sin commit") || lower.contains("uncommitted")
-    {
-        return Some(("git status", "Git status"));
-    }
-
-    // Git log
-    if lower.contains("git log") || lower.contains("ultimos commits") || lower.contains("recent commits") {
-        return Some(("git log --oneline -10", "Recent commits"));
-    }
-
-    // Disk space
-    if lower.contains("espacio") || lower.contains("disk space") || lower.contains("storage") {
-        return Some(("df -h .", "Disk space"));
-    }
-
-    None
+    Some(cmd)
 }
 
 /// Run the tool-aware agent loop (claurst-style)
@@ -864,37 +867,42 @@ async fn run_agent_loop(
     let registry = default_registry();
     let ctx = ToolContext::new();
 
-    // ── Smart pre-executor: detect common intents and run commands first ──
-    // This avoids depending on the LLM to emit tool calls (which 7B models often fail at)
-    let pre_context = if let Some((cmd, desc)) = intent_to_command(&prompt) {
-        let _ = tx.send(GenResult::AgentNeedApproval {
-            command: cmd.to_string(),
-            reason: desc.to_string(),
-        }).await;
+    // ── Smart pre-executor: ask LLM to classify if a command is needed ──
+    let _ = tx.send(GenResult::AgentThink("Classifying intent...".into())).await;
 
-        match approval_rx.recv().await {
-            Some(ApprovalResponse::Approved) => {
-                let result = sovereign_core::diff::execute_command(cmd,
-                    &ctx.working_dir.to_string_lossy());
-                match result {
-                    Ok(r) => {
-                        let _ = tx.send(GenResult::AgentThink(
-                            format!("[+] {desc}: {} bytes", r.stdout.len())
-                        )).await;
-                        format!("\n\n[System executed `{cmd}` for you. Result:]\n{}\n\n\
-                                 Use this result to answer the user's question naturally.",
-                                r.stdout)
+    let pre_context = match classify_intent(&client, &model, &prompt).await {
+        Some(cmd) => {
+            let _ = tx.send(GenResult::AgentNeedApproval {
+                command: cmd.clone(),
+                reason: "Agent wants to run this".into(),
+            }).await;
+
+            match approval_rx.recv().await {
+                Some(ApprovalResponse::Approved) => {
+                    let result = sovereign_core::diff::execute_command(&cmd,
+                        &ctx.working_dir.to_string_lossy());
+                    match result {
+                        Ok(r) => {
+                            let _ = tx.send(GenResult::AgentThink(
+                                format!("[+] {} bytes", r.stdout.len())
+                            )).await;
+                            format!("\n\n[System ran `{cmd}`. Output:]\n{}\n\n\
+                                     Use this output to answer the user naturally.",
+                                    r.stdout)
+                        }
+                        Err(e) => format!("\n\n[`{cmd}` failed: {e}]\n")
                     }
-                    Err(e) => format!("\n\n[Command `{cmd}` failed: {e}]\n")
+                }
+                _ => {
+                    let _ = tx.send(GenResult::AgentThink("[denied]".into())).await;
+                    "\n\n[User denied the command. Answer with what you know.]\n".into()
                 }
             }
-            _ => {
-                let _ = tx.send(GenResult::AgentThink("[denied]".into())).await;
-                "\n\n[The user denied the command. Answer based on what you know.]\n".into()
-            }
         }
-    } else {
-        String::new()
+        None => {
+            let _ = tx.send(GenResult::AgentThink("No command needed".into())).await;
+            String::new()
+        }
     };
 
     // Build system prompt with tool descriptions + pre-context
