@@ -43,9 +43,13 @@ pub async fn run_tui() -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
     let mut coordinator = Coordinator::new();
+    coordinator.auto_detect_models().await;
     let scanner = SecurityScanner::new();
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut buddy = Buddy::load_or_create(&project_root);
+
+    let active = coordinator.force_model.as_deref()
+        .unwrap_or(coordinator.recommendation.dev_model);
 
     let mut messages: Vec<ChatMsg> = vec![
         ChatMsg::system(format!(

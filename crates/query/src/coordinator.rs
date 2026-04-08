@@ -43,8 +43,23 @@ pub struct Coordinator {
     pub rag_enabled: bool,
 }
 
+/// Fallback model list — tried in order until one exists
+const FALLBACK_MODELS: &[&str] = &[
+    "qwen2.5-coder:14b-q8_0",
+    "qwen2.5-coder:14b",
+    "qwen2.5-coder:7b",
+    "qwen2.5:7b",
+    "qwen2.5:3b",
+    "llama3.2:3b",
+    "mistral:7b",
+    "deepseek-r1:14b",
+    "deepseek-r1:7b",
+    "phi-4:mini",
+];
+
 impl Coordinator {
-    /// Initialize with hardware-aware model selection
+    /// Initialize with hardware-aware model selection.
+    /// Checks which models are actually installed and falls back automatically.
     pub fn new() -> Self {
         let hw = HardwareEnv::detect();
         let recommendation = hw.tier.recommended_models();
@@ -53,12 +68,10 @@ impl Coordinator {
 
         let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-        // Load existing index
         let index_path = default_index_path(&project_root);
         let memory = VectorStore::load_or_create(&index_path).unwrap_or_else(|_| VectorStore::new());
         let rag_enabled = memory.chunk_count() > 0;
 
-        // Load Grimoire (security patterns KB)
         let grimoire = Grimoire::open(&project_root).ok();
 
         tracing::info!(
@@ -80,6 +93,51 @@ impl Coordinator {
             grimoire,
             project_root,
             rag_enabled,
+        }
+    }
+
+    /// Check installed models and set force_model to the best available one.
+    /// Call this once after creation from an async context.
+    pub async fn auto_detect_models(&mut self) {
+        let installed = match self.client.list_models().await {
+            Ok(models) => models,
+            Err(_) => {
+                tracing::warn!("Could not list Ollama models. Is Ollama running?");
+                return;
+            }
+        };
+
+        if installed.is_empty() {
+            tracing::warn!("No models installed. Run: ollama pull qwen2.5:7b");
+            return;
+        }
+
+        tracing::info!(models = ?installed, "Installed models detected");
+
+        // Check if recommended dev model is installed
+        let dev = self.recommendation.dev_model;
+        let dev_installed = installed.iter().any(|m| m.starts_with(dev.split(':').next().unwrap_or(dev)));
+
+        if !dev_installed {
+            // Find best fallback
+            for fallback in FALLBACK_MODELS {
+                let base = fallback.split(':').next().unwrap_or(fallback);
+                if installed.iter().any(|m| m.starts_with(base)) {
+                    tracing::info!(
+                        recommended = dev,
+                        using = *fallback,
+                        "Recommended model not found, falling back"
+                    );
+                    self.force_model = Some(fallback.to_string());
+                    return;
+                }
+            }
+
+            // Last resort: use first installed model
+            if let Some(first) = installed.first() {
+                tracing::info!(using = %first, "Using first available model");
+                self.force_model = Some(first.clone());
+            }
         }
     }
 

@@ -37,6 +37,7 @@ async fn run_repl() -> Result<()> {
     use std::io::{self, Write};
 
     let mut coord = Coordinator::new();
+    coord.auto_detect_models().await;
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut buddy = Buddy::load_or_create(&project_root);
 
