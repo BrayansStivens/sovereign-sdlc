@@ -45,6 +45,28 @@ pub fn system_prompt_for_tier(tier: PerformanceTier) -> &'static str {
     }
 }
 
+/// Tool usage guidelines — adapted from claurst TOOL_USE_GUIDELINES
+pub const TOOL_USE_GUIDELINES: &str = "\
+## Tool usage guidelines
+- Do NOT use bash to read files when the read tool is available.
+- Do NOT use bash to search files when grep or glob is available.
+- Do NOT use bash to write files when the write or edit tool is available.
+- Use bash only for running commands, installing packages, and git operations.
+- When editing, always read the file first to understand its current state.
+- Use glob to find files by name pattern. Use grep to search file contents.
+- One tool call per response. Wait for the result before calling another.
+- After receiving a tool result, continue reasoning or call another tool.\n\n";
+
+/// Safety guidelines — adapted from claurst SAFETY_GUIDELINES
+pub const SAFETY_GUIDELINES: &str = "\
+## Safety
+- Never delete files or directories without the user explicitly asking.
+- Be careful with destructive bash commands (rm, git reset --hard, DROP TABLE).
+- Never expose secrets, tokens, passwords, or API keys in code or output.
+- Do not overwrite files without reading them first.
+- If unsure whether an action is destructive, ask the user before proceeding.
+- Validate that paths exist before writing to avoid creating files in wrong locations.\n\n";
+
 /// Context prefix for code generation tasks
 pub const CODE_CONTEXT_PREFIX: &str = "[Task: Code Generation]\n";
 
@@ -70,12 +92,9 @@ pub fn agent_system_prompt(
     // Tool descriptions (from ToolRegistry::system_prompt())
     prompt.push_str(tool_descriptions);
 
-    // Reinforce tool-use behavior after tool list
-    prompt.push_str(
-        "IMPORTANT: Always use tools to take action. If the user asks you to create, edit, \
-         read, search, or run something — call the appropriate tool. Never just show code in \
-         a response when you should be writing it to a file with the write tool.\n\n"
-    );
+    // Tool usage guidelines and safety (adapted from claurst)
+    prompt.push_str(TOOL_USE_GUIDELINES);
+    prompt.push_str(SAFETY_GUIDELINES);
 
     // Grimoire — learned security patterns
     if !grimoire_context.is_empty() {

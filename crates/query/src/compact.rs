@@ -68,19 +68,47 @@ pub fn split_for_compression(
     (to_summarize, to_keep)
 }
 
-/// Generate a compression prompt for the LLM
+/// No-tools preamble (adapted from claurst) — prevents the model from calling tools
+/// during compression, which would waste the turn.
+const NO_TOOLS_PREAMBLE: &str = "\
+CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\
+Do NOT use read, bash, grep, glob, edit, write, or ANY tool.\n\
+You already have all the context you need below.\n\
+Your entire response must be plain text summary.\n\n";
+
+/// Generate a compression prompt for the LLM (adapted from claurst BASE_COMPACT_PROMPT)
 pub fn compression_prompt(messages: &[(String, String)]) -> String {
-    let mut chat_text = String::from(
-        "Summarize the following conversation into a concise knowledge base. \
-         Preserve: key decisions, code snippets discussed, security findings, \
-         and any important context. Be factual and brief.\n\n"
+    let mut prompt = String::from(NO_TOOLS_PREAMBLE);
+
+    prompt.push_str(
+        "Summarize the conversation below into a structured knowledge base.\n\n\
+         Your summary MUST preserve:\n\
+         1. The user's primary request and goal\n\
+         2. Key technical decisions made\n\
+         3. Files read, created, or modified (with paths)\n\
+         4. Code snippets and function signatures discussed\n\
+         5. Errors encountered and how they were resolved\n\
+         6. Tool results that contained important information\n\
+         7. Any pending tasks or next steps\n\n\
+         Format your response as:\n\
+         ## Goal\n\
+         [What the user is trying to accomplish]\n\n\
+         ## Progress\n\
+         [What was done, files changed, key decisions]\n\n\
+         ## Context\n\
+         [Important code, paths, errors, patterns to remember]\n\n\
+         ## Next\n\
+         [Pending work or suggested next steps]\n\n\
+         Be concise but preserve every technical detail. \
+         Do NOT omit file paths, function names, or error messages.\n\n\
+         --- CONVERSATION TO SUMMARIZE ---\n\n"
     );
 
     for (role, content) in messages {
-        chat_text.push_str(&format!("{role}: {}\n", truncate(content, 500)));
+        prompt.push_str(&format!("{role}: {}\n\n", truncate(content, 800)));
     }
 
-    chat_text
+    prompt
 }
 
 /// Format the compression result as a system message
