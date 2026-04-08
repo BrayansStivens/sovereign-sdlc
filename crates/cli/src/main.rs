@@ -37,7 +37,7 @@ async fn run_repl() -> Result<()> {
     use std::io::{self, Write};
 
     let mut coord = Coordinator::new();
-    coord.auto_detect_models().await;
+    let onboarding = coord.auto_detect_models().await;
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut buddy = Buddy::load_or_create(&project_root);
 
@@ -51,6 +51,24 @@ async fn run_repl() -> Result<()> {
 
     // ── Status ──
     print_status(&coord, &buddy);
+
+    // ── Onboarding: show missing models + install commands ──
+    if let Some(onboard_msg) = &onboarding {
+        println!("  {YELLOW}{BOLD}Setup{RESET}");
+        let sep2 = "-".repeat(40);
+        println!("  {GRAY}{sep2}{RESET}");
+        for line in onboard_msg.lines() {
+            if line.starts_with("  ollama pull") {
+                println!("  {GREEN}{BOLD}{line}{RESET}");
+            } else if line.contains("No models") || line.contains("Could not connect") {
+                println!("  {RED}{line}{RESET}");
+            } else {
+                println!("  {DIM}{line}{RESET}");
+            }
+        }
+        println!("  {GRAY}{sep2}{RESET}");
+        println!();
+    }
 
     // ── Buddy greeting ──
     let (idle, _, _) = buddy.data.species.frames();
@@ -69,6 +87,8 @@ async fn run_repl() -> Result<()> {
         buddy.data.rarity.label(), buddy.data.level);
     println!();
 
+    let active = coord.active_model();
+    println!("  {GREEN}{BOLD}Model:{RESET} {WHITE}{active}{RESET}");
     println!("  {DIM}Type {WHITE}/help{RESET}{DIM} for commands. {WHITE}Ctrl+C{RESET}{DIM} to quit.{RESET}");
     let sep = "-".repeat(50);
     println!("  {GRAY}{sep}{RESET}");

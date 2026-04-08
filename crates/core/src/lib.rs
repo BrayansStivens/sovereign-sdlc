@@ -5,6 +5,7 @@ pub mod history;
 pub mod system_prompt;
 pub mod docs;
 pub mod diff;
+pub mod model_db;
 
 pub use hardware_env::{
     HardwareEnv, ModelWeight, PerformanceTier, Platform, SafeLoadResult, ModelRecommendation,
@@ -23,6 +24,10 @@ pub use system_prompt::{
     CODE_CONTEXT_PREFIX, DOC_CONTEXT_PREFIX, REVIEW_CONTEXT_PREFIX,
 };
 pub use docs::{analyze_project, architecture_prompt, module_doc_prompt, ProjectStructure, ModuleInfo};
+pub use model_db::{
+    ModelSpec, ModelCategory, RecommendedSetup, MODEL_CATALOG,
+    models_for_budget, recommended_setup, onboarding_message,
+};
 pub use diff::{
     FileDiff, DiffLine, LineTag, ProposedAction, CommandResult,
     classify_command_risk, apply_edit, execute_command,

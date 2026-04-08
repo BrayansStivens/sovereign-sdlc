@@ -43,24 +43,29 @@ pub async fn run_tui() -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
     let mut coordinator = Coordinator::new();
-    coordinator.auto_detect_models().await;
+    let onboarding = coordinator.auto_detect_models().await;
     let scanner = SecurityScanner::new();
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut buddy = Buddy::load_or_create(&project_root);
 
-    let active = coordinator.force_model.as_deref()
-        .unwrap_or(coordinator.recommendation.dev_model);
-
     let mut messages: Vec<ChatMsg> = vec![
         ChatMsg::system(format!(
-            "Sovereign SDLC v{} | {} | {}",
-            env!("CARGO_PKG_VERSION"), coordinator.hw.platform, coordinator.hw.tier,
-        )),
-        ChatMsg::system(format!(
-            "{} the {} [{}] joined!",
-            buddy.data.name, buddy.data.species.display_name(), buddy.data.rarity.label(),
+            "Sovereign SDLC v{} | {} | {} | Model: {}",
+            env!("CARGO_PKG_VERSION"), coordinator.hw.platform,
+            coordinator.hw.tier, coordinator.active_model(),
         )),
     ];
+
+    // Show onboarding if models are missing
+    if let Some(onboard) = onboarding {
+        messages.push(ChatMsg::system(onboard));
+    }
+
+    messages.push(ChatMsg::system(format!(
+        "{} the {} [{}] joined!",
+        buddy.data.name, buddy.data.species.display_name(), buddy.data.rarity.label(),
+    )));
+
     let mut input = String::new();
     let mut cursor_pos: usize = 0;
     let mut scroll: u16 = 0;

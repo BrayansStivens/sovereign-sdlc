@@ -97,48 +97,53 @@ impl Coordinator {
     }
 
     /// Check installed models and set force_model to the best available one.
-    /// Call this once after creation from an async context.
-    pub async fn auto_detect_models(&mut self) {
+    /// Returns onboarding message if models are missing, None if all good.
+    pub async fn auto_detect_models(&mut self) -> Option<String> {
         let installed = match self.client.list_models().await {
             Ok(models) => models,
             Err(_) => {
-                tracing::warn!("Could not list Ollama models. Is Ollama running?");
-                return;
+                return Some(
+                    "Could not connect to Ollama. Make sure it's running:\n\n  ollama serve\n".into()
+                );
             }
         };
 
+        // Generate onboarding message (shows what to install)
+        let budget = self.hw.available_ram_gb;
+        let onboard = sovereign_core::onboarding_message(self.hw.tier, &installed, budget);
+
         if installed.is_empty() {
-            tracing::warn!("No models installed. Run: ollama pull qwen2.5:7b");
-            return;
+            return onboard;
         }
 
         tracing::info!(models = ?installed, "Installed models detected");
 
         // Check if recommended dev model is installed
         let dev = self.recommendation.dev_model;
-        let dev_installed = installed.iter().any(|m| m.starts_with(dev.split(':').next().unwrap_or(dev)));
+        let dev_installed = installed.iter()
+            .any(|m| m.starts_with(dev.split(':').next().unwrap_or(dev)));
 
         if !dev_installed {
-            // Find best fallback
+            // Find best fallback from catalog
             for fallback in FALLBACK_MODELS {
                 let base = fallback.split(':').next().unwrap_or(fallback);
                 if installed.iter().any(|m| m.starts_with(base)) {
-                    tracing::info!(
-                        recommended = dev,
-                        using = *fallback,
-                        "Recommended model not found, falling back"
-                    );
                     self.force_model = Some(fallback.to_string());
-                    return;
+                    return onboard;
                 }
             }
-
-            // Last resort: use first installed model
+            // Last resort: first installed model
             if let Some(first) = installed.first() {
-                tracing::info!(using = %first, "Using first available model");
                 self.force_model = Some(first.clone());
             }
         }
+
+        onboard
+    }
+
+    /// Get the model that will actually be used for generation
+    pub fn active_model(&self) -> &str {
+        self.force_model.as_deref().unwrap_or(self.recommendation.dev_model)
     }
 
     // ── Model Management ──
