@@ -17,6 +17,8 @@ use sovereign_tools::SecurityScanner;
 
 use crate::buddy::Buddy;
 use crate::loading::{LoadingAnimation, LoadingState};
+use crate::approval::{self, ApprovalState};
+use sovereign_core::diff::{self, FileDiff, ProposedAction, classify_command_risk};
 
 // ── Astro-inspired palette ──
 const INDIGO: Color = Color::Rgb(79, 70, 229);
@@ -72,8 +74,9 @@ pub async fn run_tui() -> Result<()> {
     let mut cursor_pos: usize = 0;
     let mut scroll: u16 = 0;
     let mut running = true;
-    let mut paste_range: Option<(usize, usize)> = None; // (start, end) of last pasted block
+    let mut paste_range: Option<(usize, usize)> = None;
     let mut last_key_time = Instant::now();
+    let mut approval_state = ApprovalState::None;
     let mut last_hw = Instant::now();
     let mut loading = LoadingAnimation::new();
     let mut gen_start: Option<Instant> = None;
@@ -115,7 +118,15 @@ pub async fn run_tui() -> Result<()> {
                 GenResult::Response { text, summary } => {
                     buddy.on_code_audited(text.lines().count() as u64);
                     messages.push(ChatMsg::route(summary));
-                    messages.push(ChatMsg::assistant(text));
+
+                    // Detect if response contains a shell command to execute
+                    if let Some(action) = detect_proposed_action(&text) {
+                        messages.push(ChatMsg::assistant(text));
+                        approval_state = ApprovalState::Pending { action, scroll: 0 };
+                    } else {
+                        messages.push(ChatMsg::assistant(text));
+                    }
+
                     loading.set(LoadingState::Idle);
                     gen_start = None;
                     scroll = 0;
@@ -188,12 +199,70 @@ pub async fn run_tui() -> Result<()> {
 
             // ── Input ──
             render_input(frame, &input, cursor_pos, loading.is_active(), paste_range, main_v[2]);
+
+            // ── Approval overlay (on top of everything) ──
+            if approval_state.is_pending() {
+                approval::render_approval(frame, &approval_state, main_v[0]);
+            }
         })?;
 
         // Events
         if event::poll(Duration::from_millis(refresh_ms.min(80)))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press { continue; }
+
+                // ── Approval overlay key handling ──
+                if approval_state.is_pending() {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Char('Y') => {
+                            // Apply the action
+                            if let ApprovalState::Pending { action, .. } = &approval_state {
+                                match action {
+                                    ProposedAction::EditFile { path, new_content, .. } => {
+                                        match diff::apply_edit(path, new_content) {
+                                            Ok(()) => messages.push(ChatMsg::route(format!("[+] Applied edit to {path}"))),
+                                            Err(e) => messages.push(ChatMsg::error(format!("Failed: {e}"))),
+                                        }
+                                        buddy.on_auto_fix();
+                                    }
+                                    ProposedAction::RunCommand { command, working_dir, .. } => {
+                                        match diff::execute_command(command, working_dir) {
+                                            Ok(result) => {
+                                                messages.push(ChatMsg::route(result.summary()));
+                                                if !result.stdout.is_empty() {
+                                                    messages.push(ChatMsg::system(result.stdout));
+                                                }
+                                                if !result.stderr.is_empty() {
+                                                    messages.push(ChatMsg::error(result.stderr));
+                                                }
+                                            }
+                                            Err(e) => messages.push(ChatMsg::error(e)),
+                                        }
+                                    }
+                                    ProposedAction::CreateFile { path, content } => {
+                                        match diff::apply_edit(path, content) {
+                                            Ok(()) => messages.push(ChatMsg::route(format!("[+] Created {path}"))),
+                                            Err(e) => messages.push(ChatMsg::error(format!("Failed: {e}"))),
+                                        }
+                                    }
+                                }
+                            }
+                            approval_state = ApprovalState::None;
+                        }
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            messages.push(ChatMsg::system("Action declined.".into()));
+                            approval_state = ApprovalState::None;
+                        }
+                        KeyCode::Char('e') | KeyCode::Char('E') => {
+                            // TODO: ask LLM to explain the change
+                            messages.push(ChatMsg::system("Explain not yet implemented.".into()));
+                        }
+                        KeyCode::Up => approval_state.scroll_up(),
+                        KeyCode::Down => approval_state.scroll_down(),
+                        _ => {}
+                    }
+                    continue;
+                }
 
                 match key.code {
                     KeyCode::Enter if !input.is_empty() && !loading.is_active() => {
@@ -567,4 +636,93 @@ const HELP: &str = "Commands
   /buddy           Companion stats
   /help            Commands
   /quit            Exit
-Scroll: Up/Down";
+Scroll: Up/Down
+Approval: (y)es (n)o (e)xplain (Esc)cancel";
+
+/// Detect if LLM response contains a proposed action (edit or command)
+fn detect_proposed_action(response: &str) -> Option<ProposedAction> {
+    // Detect ```diff blocks → file edit
+    if let Some(diff_start) = response.find("```diff") {
+        let content_start = diff_start + 7;
+        if let Some(diff_end) = response[content_start..].find("```") {
+            let diff_block = response[content_start..content_start + diff_end].trim();
+
+            // Try to extract file path from --- a/path line
+            let file_path = diff_block.lines()
+                .find(|l| l.starts_with("--- a/") || l.starts_with("--- "))
+                .and_then(|l| l.strip_prefix("--- a/").or_else(|| l.strip_prefix("--- ")))
+                .unwrap_or("unknown_file")
+                .trim()
+                .to_string();
+
+            // Read current file if it exists
+            let old_content = std::fs::read_to_string(&file_path).unwrap_or_default();
+
+            // Try to extract new content from +++ lines
+            // For now, show the diff as-is and let user decide
+            let new_content = apply_diff_lines(&old_content, diff_block);
+            let diff = FileDiff::compute(&file_path, &old_content, &new_content);
+
+            if diff.has_changes() {
+                return Some(ProposedAction::EditFile {
+                    path: file_path,
+                    diff,
+                    new_content,
+                });
+            }
+        }
+    }
+
+    // Detect ```bash or ```sh blocks → command execution
+    for marker in &["```bash", "```sh", "```shell"] {
+        if let Some(cmd_start) = response.find(marker) {
+            let content_start = cmd_start + marker.len();
+            if let Some(cmd_end) = response[content_start..].find("```") {
+                let command = response[content_start..content_start + cmd_end].trim().to_string();
+
+                // Skip if it looks like an install instruction (ollama pull, apt, brew)
+                let lower = command.to_lowercase();
+                if lower.starts_with("ollama ") || lower.starts_with("brew ") || lower.starts_with("apt ") {
+                    continue;
+                }
+
+                if !command.is_empty() && command.lines().count() <= 3 {
+                    let (is_dangerous, danger_reason) = classify_command_risk(&command);
+                    let working_dir = std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("."))
+                        .to_string_lossy().to_string();
+
+                    return Some(ProposedAction::RunCommand {
+                        command,
+                        working_dir,
+                        is_dangerous,
+                        danger_reason,
+                    });
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Simple diff application: take + lines from a diff block as the new content
+fn apply_diff_lines(old: &str, diff_block: &str) -> String {
+    let mut result = String::new();
+    let mut has_diff_lines = false;
+
+    for line in diff_block.lines() {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            has_diff_lines = true;
+            result.push_str(line.strip_prefix('+').unwrap_or(line));
+            result.push('\n');
+        } else if line.starts_with(' ') {
+            has_diff_lines = true;
+            result.push_str(line.strip_prefix(' ').unwrap_or(line));
+            result.push('\n');
+        }
+    }
+
+    // If no diff-style lines found, return old content
+    if has_diff_lines { result } else { old.to_string() }
+}
