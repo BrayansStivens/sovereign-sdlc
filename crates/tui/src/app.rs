@@ -760,6 +760,7 @@ fn needs_agent(prompt: &str) -> bool {
 }
 
 /// Run the ReAct agent loop in a background task
+/// Run the tool-aware agent loop (claurst-style)
 async fn run_agent_loop(
     tx: mpsc::Sender<GenResult>,
     mut approval_rx: mpsc::Receiver<ApprovalResponse>,
@@ -767,181 +768,106 @@ async fn run_agent_loop(
     prompt: String,
     system_context: String,
 ) {
-    let client = sovereign_api::OllamaClient::new();
+    use sovereign_tools::{default_registry, parse_tool_call, ToolContext};
 
-    // Simple, explicit prompt that even 7B models follow
-    let react_prompt = format!(
-        "{system_context}\n\
-         You are an AI assistant with access to the user's computer.\n\
-         To answer the user's question, you may need to run commands.\n\n\
-         IMPORTANT: When you need to run a command, output EXACTLY this format on its own line:\n\
-         EXECUTE: <command>\n\n\
-         When you need to read a file:\n\
-         READ: <filepath>\n\n\
-         When you have the final answer:\n\
-         ANSWER: <your response>\n\n\
-         Example:\n\
-         User: what directory are we in?\n\
-         EXECUTE: pwd\n\n\
-         Example:\n\
-         User: what's in main.rs?\n\
-         READ: src/main.rs\n\n\
-         Now answer this:\n\
+    let client = sovereign_api::OllamaClient::new();
+    let registry = default_registry();
+    let ctx = ToolContext::new();
+
+    // Build system prompt with tool descriptions
+    let tools_prompt = registry.system_prompt();
+    let full_system = format!(
+        "{system_context}\n{tools_prompt}\n\
          User: {prompt}"
     );
 
-    let mut context = react_prompt;
-    let max_iterations = 6;
+    let mut messages = full_system;
+    let max_turns = 8;
 
-    for i in 0..max_iterations {
-        let _ = tx.send(GenResult::AgentThink(format!("Step {}/{max_iterations}", i + 1))).await;
+    for turn in 0..max_turns {
+        let _ = tx.send(GenResult::AgentThink(format!("Turn {}/{max_turns}", turn + 1))).await;
 
-        let response = match client.generate(&model, &context).await {
+        // Ask LLM
+        let response = match client.generate(&model, &messages).await {
             Ok(r) => r,
             Err(e) => {
-                let _ = tx.send(GenResult::Error(format!("Agent: {e}"))).await;
+                let _ = tx.send(GenResult::Error(format!("{e}"))).await;
                 return;
             }
         };
 
-        // Try to find an action in the response (flexible parsing)
-        let action = parse_agent_action(&response);
-
-        match action {
-            AgentAction::Execute(cmd) => {
-                let short_thought = extract_thought(&response);
-                if !short_thought.is_empty() {
-                    let _ = tx.send(GenResult::AgentThink(short_thought)).await;
+        // Try to parse a tool call from the response
+        match parse_tool_call(&response) {
+            Some((call, thinking)) => {
+                // Show thinking text if any
+                if !thinking.is_empty() {
+                    let short = if thinking.len() > 150 { format!("{}...", &thinking[..150]) } else { thinking };
+                    let _ = tx.send(GenResult::AgentThink(short)).await;
                 }
 
-                let _ = tx.send(GenResult::AgentNeedApproval {
-                    command: cmd.clone(),
-                    reason: "Agent wants to run this command".into(),
-                }).await;
+                let tool = registry.get(&call.name);
+                let perm_level = tool.map(|t| t.permission_level())
+                    .unwrap_or(sovereign_tools::PermissionLevel::Execute);
 
-                match approval_rx.recv().await {
-                    Some(ApprovalResponse::Approved) => {
-                        let cwd = std::env::current_dir()
-                            .unwrap_or_else(|_| PathBuf::from("."))
-                            .to_string_lossy().to_string();
-                        let obs = match diff::execute_command(&cmd, &cwd) {
-                            Ok(r) => if r.success { r.stdout } else { format!("Error: {}", r.stderr) },
-                            Err(e) => format!("Failed: {e}"),
-                        };
-                        context.push_str(&format!("\nResult of `{cmd}`:\n{obs}\n\nNow give the final ANSWER:"));
-                    }
-                    _ => {
-                        context.push_str("\nThe user denied that command. Give an ANSWER: with what you know.");
-                    }
-                }
-            }
-            AgentAction::Read(path) => {
-                let _ = tx.send(GenResult::AgentReadFile(path.clone())).await;
-                let obs = match std::fs::read_to_string(&path) {
-                    Ok(c) => if c.len() > 3000 {
-                        let end = (0..=3000).rev().find(|&i| c.is_char_boundary(i)).unwrap_or(0);
-                        format!("{}...\n[truncated]", &c[..end])
-                    } else { c },
-                    Err(e) => format!("Error: {e}"),
+                // Auto-allow read-only tools, ask for everything else
+                let approved = if perm_level == sovereign_tools::PermissionLevel::ReadOnly {
+                    let _ = tx.send(GenResult::AgentReadFile(
+                        call.input.get("path").and_then(|v| v.as_str())
+                            .or_else(|| call.input.get("pattern").and_then(|v| v.as_str()))
+                            .unwrap_or(&call.name).to_string()
+                    )).await;
+                    true
+                } else {
+                    // Need user approval
+                    let desc = format!("{}: {}",
+                        call.name,
+                        call.input.get("command").and_then(|v| v.as_str())
+                            .or_else(|| call.input.get("path").and_then(|v| v.as_str()))
+                            .unwrap_or("(see details)")
+                    );
+                    let _ = tx.send(GenResult::AgentNeedApproval {
+                        command: desc,
+                        reason: format!("Tool: {}", call.name),
+                    }).await;
+
+                    matches!(approval_rx.recv().await, Some(ApprovalResponse::Approved))
                 };
-                context.push_str(&format!("\nContents of {path}:\n{obs}\n\nNow give the final ANSWER:"));
+
+                if approved {
+                    let result = registry.execute(&call, &ctx)
+                        .unwrap_or_else(|e| sovereign_tools::ToolResult::error(format!("{e}")));
+
+                    let status = if result.is_error { "Error" } else { "Result" };
+                    let _ = tx.send(GenResult::AgentThink(
+                        format!("[{status}] {} chars", result.output.len())
+                    )).await;
+
+                    // Feed result back to LLM
+                    messages.push_str(&format!(
+                        "\nAssistant: {response}\n\
+                         Tool Result ({}):\n{}\n\n\
+                         Based on this result, respond to the user. \
+                         If you need another tool, use the ```tool format. \
+                         Otherwise, just respond normally.",
+                        call.name, result.output,
+                    ));
+                } else {
+                    messages.push_str(&format!(
+                        "\nAssistant: {response}\n\
+                         Tool Result: Permission denied by user.\n\n\
+                         The user denied this action. Respond with what you know."
+                    ));
+                }
             }
-            AgentAction::Answer(answer) => {
-                let _ = tx.send(GenResult::AgentDone(answer)).await;
-                return;
-            }
-            AgentAction::None => {
-                // LLM didn't follow format — treat entire response as answer
+            None => {
+                // No tool call — this is the final response
                 let _ = tx.send(GenResult::AgentDone(response)).await;
                 return;
             }
         }
     }
 
-    let _ = tx.send(GenResult::AgentDone("Max steps reached.".into())).await;
-}
-
-/// Possible agent actions parsed from LLM response
-enum AgentAction {
-    Execute(String),
-    Read(String),
-    Answer(String),
-    None,
-}
-
-/// Flexibly parse an action from LLM response (handles many formats)
-fn parse_agent_action(response: &str) -> AgentAction {
-    for line in response.lines() {
-        let t = line.trim();
-
-        // EXECUTE: pwd  or  Action: EXECUTE pwd  or  ```bash\npwd\n```
-        if let Some(cmd) = t.strip_prefix("EXECUTE:")
-            .or_else(|| t.strip_prefix("EXECUTE "))
-            .or_else(|| t.strip_prefix("Action: EXECUTE "))
-            .or_else(|| t.strip_prefix("Action: EXECUTE:"))
-        {
-            let cmd = cmd.trim();
-            if !cmd.is_empty() {
-                return AgentAction::Execute(cmd.to_string());
-            }
-        }
-
-        // READ: path  or  READ_FILE path
-        if let Some(path) = t.strip_prefix("READ:")
-            .or_else(|| t.strip_prefix("READ "))
-            .or_else(|| t.strip_prefix("READ_FILE "))
-            .or_else(|| t.strip_prefix("Action: READ_FILE "))
-            .or_else(|| t.strip_prefix("Action: READ "))
-        {
-            let path = path.trim();
-            if !path.is_empty() {
-                return AgentAction::Read(path.to_string());
-            }
-        }
-
-        // ANSWER: text
-        if let Some(answer) = t.strip_prefix("ANSWER:")
-            .or_else(|| t.strip_prefix("ANSWER "))
-            .or_else(|| t.strip_prefix("Action: ANSWER "))
-        {
-            let answer = answer.trim();
-            if !answer.is_empty() {
-                return AgentAction::Answer(answer.to_string());
-            }
-        }
-    }
-
-    // Check for ```bash blocks as implicit EXECUTE
-    if let Some(start) = response.find("```bash") {
-        let content_start = start + 7;
-        if let Some(end) = response[content_start..].find("```") {
-            let cmd = response[content_start..content_start + end].trim();
-            if !cmd.is_empty() && cmd.lines().count() <= 2 {
-                return AgentAction::Execute(cmd.to_string());
-            }
-        }
-    }
-
-    AgentAction::None
-}
-
-/// Extract the "thinking" part of a response (before any action keyword)
-fn extract_thought(response: &str) -> String {
-    let thought: String = response.lines()
-        .take_while(|l| {
-            let t = l.trim().to_uppercase();
-            !t.starts_with("EXECUTE") && !t.starts_with("READ")
-                && !t.starts_with("ANSWER") && !t.starts_with("ACTION")
-                && !t.starts_with("```")
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let trimmed = thought.trim();
-    if trimmed.len() > 150 {
-        format!("{}...", &trimmed[..150])
-    } else {
-        trimmed.to_string()
-    }
+    let _ = tx.send(GenResult::AgentDone("Max turns reached.".into())).await;
 }
 
 /// Detect if LLM response contains a proposed action (edit or command)

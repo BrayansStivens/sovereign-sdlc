@@ -5,6 +5,7 @@ pub mod history;
 pub mod system_prompt;
 pub mod docs;
 pub mod diff;
+pub mod permissions;
 pub mod model_db;
 
 pub use hardware_env::{
@@ -28,6 +29,7 @@ pub use model_db::{
     ModelSpec, ModelCategory, RecommendedSetup, MODEL_CATALOG,
     models_for_budget, recommended_setup, onboarding_message,
 };
+pub use permissions::{PermissionManager, PermissionDecision, PermissionRequest};
 pub use diff::{
     FileDiff, DiffLine, LineTag, ProposedAction, CommandResult,
     classify_command_risk, apply_edit, execute_command,
